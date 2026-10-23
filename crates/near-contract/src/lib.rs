@@ -50,7 +50,8 @@
 //! - Chains: `set_evm_chain` stores the MPC signing path, the next nonce and the max fee cap.
 //!   The nonce only goes up. The owner cannot lower it, so a nonce cannot be reused.
 //! - Deposits: a relayer calls `report_evm_deposit` for each observed transfer. Each
-//!   `(chain_id, tx_hash, log_index)` is credited once. The credit goes to the owner of `from`
+//!   `(chain_id, tx_hash, log_index, asset)` is credited once (deposits credited before the asset
+//!   was part of the key are still checked by their `(chain_id, tx_hash, log_index)`). The credit goes to the owner of `from`
 //!   (its linked account, or its own id).
 //! - Withdrawals: `withdraw_evm` (NEAR account) or the signed `WithdrawEvm` debits the balance
 //!   and records a `Pending` withdrawal. A relayer calls `process_withdrawal`, which reserves
@@ -60,11 +61,12 @@
 //!   positions (`has_state`), so no balance can become unreachable after linking.
 
 mod evm;
+mod tokenomics;
 
 use std::collections::BTreeMap;
 
 use near_sdk::json_types::U128;
-use near_sdk::store::{IterableMap, IterableSet, LookupMap, LookupSet};
+use near_sdk::store::{IterableMap, IterableSet, LazyOption, LookupMap, LookupSet};
 use near_sdk::{
     assert_one_yocto, env, ext_contract, near, AccountId, BorshStorageKey, Gas, NearToken,
     PanicOnDefault, Promise, PromiseError, PromiseOrValue,
@@ -79,6 +81,12 @@ use accounts::{
     action_message, engine_id_for, owner_hex, owner_of_account, parse_owner_hex, parse_signature,
     verify_wallet_signature, LinkRegistry, LinkRequest, Owner, WalletId,
 };
+use tokenomics::{PendingEpoch, StakeKey};
+use windswap_engine::gauge::{ClGauge, PositionManager};
+use windswap_engine::minter::Minter;
+use windswap_engine::rebase::RewardsDistributor;
+use windswap_engine::ve::VotingEscrow;
+use windswap_engine::voter::Voter;
 
 #[near(serializers = [borsh])]
 #[derive(BorshStorageKey)]
@@ -103,6 +111,20 @@ enum StorageKey {
     EvmChains,
     EvmDeposits,
     HasState,
+    // Appended after the v5 prefixes above.
+    /// Deposits keyed with the asset: `(chain_id, tx_hash, log_index, asset)`.
+    EvmDepositsByAsset,
+    // Appended in v6 (ve(3,3) tokenomics). Each engine state is one Borsh blob under its key.
+    Ve,
+    Voter,
+    Minter,
+    Distributor,
+    /// One `ClGauge` per pool, keyed by pool id.
+    Gauges,
+    /// Staked positions, keyed by `StakeKey`.
+    Stakes,
+    /// The NFT manager of the staked positions.
+    NftManager,
 }
 
 #[near(contract_state)]
@@ -140,18 +162,42 @@ pub struct Contract {
     evm_asset_by_token: LookupMap<String, String>,
     /// EVM chain settings (signing path, next nonce, fee cap), keyed by chain id.
     evm_chains: LookupMap<u64, EvmChain>,
-    /// `(chain_id, tx_hash, log_index)` of every deposit already credited.
+    /// `(chain_id, tx_hash, log_index)` of every deposit credited before `evm_deposits_by_asset`
+    /// existed. Read only: a report is a duplicate if its legacy key or its asset key is here.
     evm_deposits: LookupSet<(u64, [u8; 32], u32)>,
+    /// `(chain_id, tx_hash, log_index, asset)` of every deposit credited since. The asset is in the
+    /// key because a native transfer and an ERC-20 `Transfer` can both be log 0 of one tx.
+    evm_deposits_by_asset: LookupSet<(u64, [u8; 32], u32, String)>,
     /// Owner ids that have ever been credited or had a position minted. A wallet whose own owner
     /// id is in this set cannot be linked. Set in `credit` and `mint_for`, and by
     /// `flag_wallet_state` for data from before v5.
     has_state: LookupSet<Owner>,
+    // Appended in v6. The ve(3,3) state is one Borsh blob per engine object (see `tokenomics`).
+    /// The WIND NEP-141 token, set once by the owner. Minted only by this contract.
+    wind_token: Option<AccountId>,
+    ve: LazyOption<VotingEscrow>,
+    voter: LazyOption<Voter>,
+    minter: LazyOption<Minter>,
+    distributor: LazyOption<RewardsDistributor>,
+    /// One gauge per pool that has one, keyed by pool id.
+    gauges: LookupMap<u64, ClGauge>,
+    /// Staked positions: `(owner, pool, tick_lower, tick_upper)` to the NFT id.
+    stakes: LookupMap<StakeKey, U256>,
+    /// The NFT manager that holds every staked position (the pools' `nft` account).
+    nft_manager: LazyOption<PositionManager>,
+    /// Set once the genesis WIND supply is minted, and while that mint is in flight.
+    wind_genesis_done: bool,
+    wind_genesis_pending: bool,
+    /// Total WIND minted by `distribute`. The WIND supply the minter sees.
+    wind_minted: u128,
+    /// The epoch whose mint is in flight, if any. See `tokenomics`.
+    pending_epoch: Option<PendingEpoch>,
 }
 
-/// State layout of the deployed testnet contract (v4): the `Contract` struct before the EVM
-/// bridge. Only used by `migrate`. Field order and types must match the deployed state exactly.
+/// State layout of the deployed testnet contract (v5): the `Contract` struct before the ve(3,3)
+/// state. Only used by `migrate`. Field order and types must match the deployed state exactly.
 #[near(serializers = [borsh])]
-struct ContractV4 {
+struct ContractV5 {
     owner: AccountId,
     fee_config: FeeConfig,
     pools: IterableMap<u64, ClPool>,
@@ -163,22 +209,16 @@ struct ContractV4 {
     mpc_contract: AccountId,
     links: LinkRegistry,
     action_nonces: LookupSet<(WalletId, u64)>,
-    pending_withdrawals: LookupMap<u64, PendingWithdrawal>,
+    withdrawals: LookupMap<u64, Withdrawal>,
     next_withdrawal_id: u64,
+    relayers: IterableSet<AccountId>,
+    evm_assets: IterableMap<String, EvmAsset>,
+    evm_asset_by_token: LookupMap<String, String>,
+    evm_chains: LookupMap<u64, EvmChain>,
+    evm_deposits: LookupSet<(u64, [u8; 32], u32)>,
+    has_state: LookupSet<Owner>,
 }
 
-/// A v4 pending withdrawal, as stored by v4. Only read by `migrate`, which turns each one into a
-/// `Withdrawal` with status `Pending`.
-#[near(serializers = [borsh])]
-struct PendingWithdrawal {
-    owner: Owner,
-    token: String,
-    amount: u128,
-    to_chain_id: u64,
-    to_address: [u8; 20],
-}
-
-/// An EVM withdrawal. The balance is debited when it is recorded.
 #[derive(Clone)]
 #[near(serializers = [borsh])]
 struct Withdrawal {
@@ -378,6 +418,68 @@ pub enum SignedAction {
         to_chain_id: u64,
         to_address: String,
     },
+    /// As `create_lock`.
+    CreateLock { amount: U128, duration: u64 },
+    /// As `increase_amount`.
+    IncreaseAmount { token_id: u64, amount: U128 },
+    /// As `increase_unlock_time`.
+    IncreaseUnlockTime { token_id: u64, duration: u64 },
+    /// As `withdraw_lock`.
+    WithdrawLock { token_id: u64 },
+    /// As `merge`.
+    Merge { from: u64, to: u64 },
+    /// As `split`.
+    Split { token_id: u64, amount: U128 },
+    /// As `lock_permanent`.
+    LockPermanent { token_id: u64 },
+    /// As `unlock_permanent`.
+    UnlockPermanent { token_id: u64 },
+    /// As `delegate`.
+    Delegate { delegator: u64, delegatee: u64 },
+    /// As `vote`.
+    Vote {
+        token_id: u64,
+        pools: Vec<u64>,
+        weights: Vec<U128>,
+    },
+    /// As `reset`.
+    Reset { token_id: u64 },
+    /// As `poke`.
+    Poke { token_id: u64 },
+    /// As `stake_position`.
+    StakePosition {
+        pool_id: u64,
+        tick_lower: i32,
+        tick_upper: i32,
+    },
+    /// As `unstake_position`.
+    UnstakePosition {
+        pool_id: u64,
+        tick_lower: i32,
+        tick_upper: i32,
+    },
+    /// As `claim_gauge_rewards`.
+    ClaimGaugeRewards {
+        pool_id: u64,
+        tick_lower: i32,
+        tick_upper: i32,
+    },
+    /// As `claim_fees`.
+    ClaimFees { token_id: u64, gauges: Vec<u64> },
+    /// As `claim_bribes`.
+    ClaimBribes {
+        token_id: u64,
+        gauges: Vec<u64>,
+        tokens: Vec<String>,
+    },
+    /// As `bribe`.
+    Bribe {
+        pool_id: u64,
+        token: String,
+        amount: U128,
+    },
+    /// As `claim_rebase`.
+    ClaimRebase { token_id: u64 },
 }
 
 /// What `execute` returns, one variant per `SignedAction`.
@@ -390,12 +492,30 @@ pub enum ActionResult {
     Collect([U128; 2]),
     /// Id of the recorded pending withdrawal.
     WithdrawEvm(u64),
+    /// Id of a new veNFT.
+    TokenId(u64),
+    /// An amount paid or returned.
+    Amount(U128),
+    /// The two new token ids of a split.
+    Split((u64, u64)),
+    /// Amounts paid per token.
+    Paid(Vec<(String, U128)>),
+    /// An action with no return value.
+    Done,
 }
 
 /// The JSON `msg` of `ft_on_transfer`. Only `owner` is read.
 #[near(serializers = [json])]
 struct DepositMsg {
     owner: Option<String>,
+    /// `{"lock": {"duration": <secs>}}`: lock the deposited WIND for `duration` seconds.
+    lock: Option<LockMsg>,
+}
+
+/// The `lock` part of a `DepositMsg`.
+#[near(serializers = [json])]
+struct LockMsg {
+    duration: u64,
 }
 
 /// A validated route: engine hops plus the tokens at both ends.
@@ -538,10 +658,8 @@ fn parse_wallet(s: &str) -> WalletId {
 
 /// The wallet named by a deposit `msg` of the form `{"owner":"<wallet>"}`. Any other message,
 /// including one that is not JSON, names no owner. A wallet that does not parse panics.
-fn deposit_wallet(msg: &str) -> Option<WalletId> {
-    let parsed: DepositMsg = near_sdk::serde_json::from_str(msg).ok()?;
-    let wallet = parsed.owner?;
-    Some(parse_wallet(&wallet))
+fn parse_deposit_msg(msg: &str) -> Option<DepositMsg> {
+    near_sdk::serde_json::from_str(msg).ok()
 }
 
 fn default_mpc_contract() -> AccountId {
@@ -1052,6 +1170,109 @@ impl Contract {
                     &to_address,
                 ))
             }
+            SignedAction::CreateLock { amount, duration } => {
+                ActionResult::TokenId(self.lock_create(owner, amount.0, duration))
+            }
+            SignedAction::IncreaseAmount { token_id, amount } => {
+                self.lock_increase_amount(owner, token_id, amount.0);
+                ActionResult::Done
+            }
+            SignedAction::IncreaseUnlockTime { token_id, duration } => {
+                self.lock_increase_unlock_time(owner, token_id, duration);
+                ActionResult::Done
+            }
+            SignedAction::WithdrawLock { token_id } => {
+                ActionResult::Amount(U128(self.lock_withdraw(owner, token_id)))
+            }
+            SignedAction::Merge { from, to } => {
+                self.lock_merge(owner, from, to);
+                ActionResult::Done
+            }
+            SignedAction::Split { token_id, amount } => {
+                ActionResult::Split(self.lock_split(owner, token_id, amount.0))
+            }
+            SignedAction::LockPermanent { token_id } => {
+                self.lock_set_permanent(owner, token_id, true);
+                ActionResult::Done
+            }
+            SignedAction::UnlockPermanent { token_id } => {
+                self.lock_set_permanent(owner, token_id, false);
+                ActionResult::Done
+            }
+            SignedAction::Delegate {
+                delegator,
+                delegatee,
+            } => {
+                self.lock_delegate(owner, delegator, delegatee);
+                ActionResult::Done
+            }
+            SignedAction::Vote {
+                token_id,
+                pools,
+                weights,
+            } => {
+                let weights: Vec<U256> = weights.iter().map(|w| U256::from(w.0)).collect();
+                self.vote_for(owner, token_id, &pools, &weights);
+                ActionResult::Done
+            }
+            SignedAction::Reset { token_id } => {
+                self.reset_for(owner, token_id);
+                ActionResult::Done
+            }
+            SignedAction::Poke { token_id } => {
+                self.poke_token(token_id);
+                ActionResult::Done
+            }
+            SignedAction::StakePosition {
+                pool_id,
+                tick_lower,
+                tick_upper,
+            } => {
+                self.stake_for(owner, pool_id, tick_lower, tick_upper);
+                ActionResult::Done
+            }
+            SignedAction::UnstakePosition {
+                pool_id,
+                tick_lower,
+                tick_upper,
+            } => {
+                self.unstake_for(owner, pool_id, tick_lower, tick_upper);
+                ActionResult::Done
+            }
+            SignedAction::ClaimGaugeRewards {
+                pool_id,
+                tick_lower,
+                tick_upper,
+            } => ActionResult::Amount(U128(
+                self.claim_gauge_for(owner, pool_id, tick_lower, tick_upper),
+            )),
+            SignedAction::ClaimFees { token_id, gauges } => ActionResult::Paid(
+                self.claim_fees_for(owner, token_id, &gauges)
+                    .into_iter()
+                    .map(|(t, a)| (t, U128(a)))
+                    .collect(),
+            ),
+            SignedAction::ClaimBribes {
+                token_id,
+                gauges,
+                tokens,
+            } => ActionResult::Paid(
+                self.claim_bribes_for(owner, token_id, &gauges, &tokens)
+                    .into_iter()
+                    .map(|(t, a)| (t, U128(a)))
+                    .collect(),
+            ),
+            SignedAction::Bribe {
+                pool_id,
+                token,
+                amount,
+            } => {
+                self.bribe_for(owner, pool_id, &token, amount.0);
+                ActionResult::Done
+            }
+            SignedAction::ClaimRebase { token_id } => {
+                ActionResult::Amount(U128(self.claim_rebase_for(token_id)))
+            }
         }
     }
 }
@@ -1060,6 +1281,9 @@ impl Contract {
 impl Contract {
     #[init]
     pub fn new(owner: AccountId) -> Self {
+        let (ve, voter, minter, distributor) =
+            tokenomics::fresh_state(&owner, now_secs(), env::block_height());
+        let nft_manager = PositionManager::new(tokenomics::nft_manager_account());
         Self {
             owner,
             fee_config: FeeConfig::default(),
@@ -1079,42 +1303,41 @@ impl Contract {
             evm_asset_by_token: LookupMap::new(StorageKey::EvmAssetByToken),
             evm_chains: LookupMap::new(StorageKey::EvmChains),
             evm_deposits: LookupSet::new(StorageKey::EvmDeposits),
+            evm_deposits_by_asset: LookupSet::new(StorageKey::EvmDepositsByAsset),
             has_state: LookupSet::new(StorageKey::HasState),
+            wind_token: None,
+            ve: LazyOption::new(StorageKey::Ve, Some(ve)),
+            voter: LazyOption::new(StorageKey::Voter, Some(voter)),
+            minter: LazyOption::new(StorageKey::Minter, Some(minter)),
+            distributor: LazyOption::new(StorageKey::Distributor, Some(distributor)),
+            gauges: LookupMap::new(StorageKey::Gauges),
+            stakes: LookupMap::new(StorageKey::Stakes),
+            nft_manager: LazyOption::new(StorageKey::NftManager, Some(nft_manager)),
+            wind_genesis_done: false,
+            wind_genesis_pending: false,
+            wind_minted: 0,
+            pending_epoch: None,
         }
     }
 
-    /// Upgrade from the deployed testnet state (the layout of `ContractV4`, the v4 `Contract`)
-    /// to v5. Run once, as the init call of the redeploy:
+    /// Upgrade from the deployed testnet state (v5, the layout before the ve(3,3) state) to v6.
+    /// Run once, as the init call of the redeploy:
     /// `near contract deploy <acct> use-file <wasm> with-init-call migrate json-args '{}'`.
     ///
-    /// Existing balances are kept. The v4 balances cannot be copied here (a `LookupMap` cannot be
-    /// iterated), so they stay where they are and the owner moves them with `migrate_balances`.
-    /// The v4 pending withdrawals are copied, each as `Pending`, by walking the ids below
-    /// `next_withdrawal_id`. Owners that already hold balances under their own wallet id are not
-    /// known to this call. Run `flag_wallet_state` on those wallets (see its docs).
+    /// Everything in v5 is kept (balances, pools, withdrawals, bridge state). The v5 balances
+    /// cannot be copied here (a `LookupMap` cannot be iterated), so they stay where they are, as
+    /// before. The ve(3,3) state starts fresh at the migration time: no locks, no gauges, no WIND
+    /// token (set it with `set_wind_token`), and no minted supply. Owners that already hold balances
+    /// under their own wallet id are not known to this call (see `flag_wallet_state`).
     /// Only the contract account can call it (`#[private]`).
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
-        let mut old: ContractV4 =
+        let old: ContractV5 =
             env::state_read().unwrap_or_else(|| env::panic_str("no contract state to migrate"));
-        let mut withdrawals = LookupMap::new(StorageKey::Withdrawals);
-        for id in 0..old.next_withdrawal_id {
-            if let Some(p) = old.pending_withdrawals.remove(&id) {
-                withdrawals.insert(
-                    id,
-                    Withdrawal {
-                        owner: p.owner,
-                        token_id: p.token,
-                        amount: p.amount,
-                        to_chain_id: p.to_chain_id,
-                        to_address: p.to_address,
-                        status: WithdrawalStatus::Pending,
-                        signing_nonce: None,
-                    },
-                );
-            }
-        }
+        let (ve, voter, minter, distributor) =
+            tokenomics::fresh_state(&old.owner, now_secs(), env::block_height());
+        let nft_manager = PositionManager::new(tokenomics::nft_manager_account());
         Self {
             owner: old.owner,
             fee_config: old.fee_config,
@@ -1127,14 +1350,27 @@ impl Contract {
             mpc_contract: old.mpc_contract,
             links: old.links,
             action_nonces: old.action_nonces,
-            withdrawals,
+            withdrawals: old.withdrawals,
             next_withdrawal_id: old.next_withdrawal_id,
-            relayers: IterableSet::new(StorageKey::Relayers),
-            evm_assets: IterableMap::new(StorageKey::EvmAssets),
-            evm_asset_by_token: LookupMap::new(StorageKey::EvmAssetByToken),
-            evm_chains: LookupMap::new(StorageKey::EvmChains),
-            evm_deposits: LookupSet::new(StorageKey::EvmDeposits),
-            has_state: LookupSet::new(StorageKey::HasState),
+            relayers: old.relayers,
+            evm_assets: old.evm_assets,
+            evm_asset_by_token: old.evm_asset_by_token,
+            evm_chains: old.evm_chains,
+            evm_deposits: old.evm_deposits,
+            evm_deposits_by_asset: LookupSet::new(StorageKey::EvmDepositsByAsset),
+            has_state: old.has_state,
+            wind_token: None,
+            ve: LazyOption::new(StorageKey::Ve, Some(ve)),
+            voter: LazyOption::new(StorageKey::Voter, Some(voter)),
+            minter: LazyOption::new(StorageKey::Minter, Some(minter)),
+            distributor: LazyOption::new(StorageKey::Distributor, Some(distributor)),
+            gauges: LookupMap::new(StorageKey::Gauges),
+            stakes: LookupMap::new(StorageKey::Stakes),
+            nft_manager: LazyOption::new(StorageKey::NftManager, Some(nft_manager)),
+            wind_genesis_done: false,
+            wind_genesis_pending: false,
+            wind_minted: 0,
+            pending_epoch: None,
         }
     }
 
@@ -1334,10 +1570,19 @@ impl Contract {
         if !self.allowed_tokens.contains(&token) {
             return PromiseOrValue::Value(amount);
         }
-        let owner = match deposit_wallet(&msg) {
-            Some(wallet) => self.links.resolve(&wallet),
+        let parsed = parse_deposit_msg(&msg);
+        let owner = match parsed.as_ref().and_then(|p| p.owner.as_ref()) {
+            Some(wallet) => self.links.resolve(&parse_wallet(wallet)),
             None => owner_of_account(&sender_id),
         };
+        let lock = parsed.and_then(|p| p.lock);
+        if let (Some(lock), true) = (lock, self.wind_token.as_ref() == Some(&token)) {
+            // A WIND deposit with a lock message becomes a veNFT of the owner. The lock pulls the
+            // deposit from the owner's balance, so the amount must be credited first.
+            self.credit(&owner, token.as_str(), amount.0);
+            self.lock_create(owner, amount.0, lock.duration);
+            return PromiseOrValue::Value(U128(0));
+        }
         self.credit(&owner, token.as_str(), amount.0);
         PromiseOrValue::Value(U128(0))
     }
@@ -1827,8 +2072,9 @@ impl Contract {
     /// Relayer only. Credits a deposit that the relayer saw on `chain_id`: `amount` of `asset`
     /// sent by `from` in log `log_index` of transaction `tx_hash` (use 0 for a native transfer).
     ///
-    /// Returns `false`, and changes nothing, if this `(chain_id, tx_hash, log_index)` was already
-    /// credited. Panics if the asset is not registered, if `amount` is zero, or if it is above
+    /// Returns `false`, and changes nothing, if this `(chain_id, tx_hash, log_index, asset)` was
+    /// already credited, or if `(chain_id, tx_hash, log_index)` was credited before the asset was
+    /// part of the key. Panics if the asset is not registered, if `amount` is zero, or if it is above
     /// the asset's per-deposit cap. The credit goes to the owner that `from` resolves to: its
     /// linked account, or its own owner id if it is not linked.
     pub fn report_evm_deposit(
@@ -1853,8 +2099,13 @@ impl Contract {
                     "asset {asset} on chain {chain_id} is not registered"
                 ))
             });
-        // A panic below reverts this insert too.
-        if !self.evm_deposits.insert((chain_id, hash, log_index)) {
+        // A report is a duplicate if its legacy key (no asset) or its asset key was credited.
+        // A panic below reverts the insert too.
+        if self.evm_deposits.contains(&(chain_id, hash, log_index))
+            || !self
+                .evm_deposits_by_asset
+                .insert((chain_id, hash, log_index, asset.clone()))
+        {
             return false;
         }
         if amount.0 == 0 {
@@ -2136,5 +2387,7 @@ mod accounts_tests;
 mod bridge_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tokenomics_tests;
 #[cfg(test)]
 mod wallet_tests;

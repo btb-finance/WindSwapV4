@@ -16,6 +16,10 @@ use crate::U256;
 
 /// `LockedManagedReward`: rebases and compounded rewards, paid to the escrow on `withdrawManaged`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct LockedManagedReward {
     /// The base accounting. Its reward list starts with the escrow token (`ManagedReward` constructor).
     pub reward: Reward,
@@ -74,6 +78,10 @@ impl LockedManagedReward {
 
 /// `FreeManagedReward`: rewards the owner of each deposited veNFT can claim directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct FreeManagedReward {
     /// The base accounting. Its reward list starts with the escrow token (`ManagedReward` constructor).
     pub reward: Reward,
@@ -118,6 +126,10 @@ impl FreeManagedReward {
 
 /// The pair `VotingEscrow` creates for each managed veNFT (`managedToLocked`, `managedToFree`).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct ManagedRewards {
     pub locked: LockedManagedReward,
     pub free: FreeManagedReward,

@@ -64,6 +64,10 @@ pub enum ProposalState {
 
 /// Amounts produced by one `updatePeriod` that the Solidity moves or mints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct EpochEmission {
     /// `_emission`: approved to and pulled by the voter through `voter.notifyRewardAmount`.
     pub emission: U256,
@@ -78,6 +82,10 @@ pub struct EpochEmission {
 
 /// State of `Minter.sol`. Fields mirror the public Solidity state variables.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct Minter {
     /// `Minter.weekly`: current weekly emission. Frozen once the tail has started.
     pub weekly: U256,

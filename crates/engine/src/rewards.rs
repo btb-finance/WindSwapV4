@@ -59,6 +59,10 @@ pub fn epoch_vote_end(timestamp: u64) -> Result<u64> {
 
 /// `Reward.Checkpoint`: a token's balance from `timestamp` on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct Checkpoint {
     pub timestamp: u64,
     pub balance_of: U256,
@@ -66,6 +70,10 @@ pub struct Checkpoint {
 
 /// `Reward.SupplyCheckpoint`: the total supply from `timestamp` on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct SupplyCheckpoint {
     pub timestamp: u64,
     pub supply: U256,
@@ -73,6 +81,10 @@ pub struct SupplyCheckpoint {
 
 /// State of `Reward.sol`. Fields mirror the public Solidity state variables.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct Reward {
     /// `totalSupply`: sum of all deposits.
     pub total_supply: U256,

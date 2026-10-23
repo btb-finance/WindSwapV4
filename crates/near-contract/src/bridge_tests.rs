@@ -391,6 +391,56 @@ fn deposit_is_credited_once_per_tx_and_log_index() {
     );
 }
 
+/// Balance of the owner that `key`'s wallet resolves to (its own id, since it is unlinked).
+fn wallet_balance(c: &Contract, key: &SigningKey, token: &str) -> u128 {
+    let owner = c.resolve_wallet(evm_wallet(key).to_string());
+    c.get_balance_of_owner(owner, token.into()).0
+}
+
+#[test]
+fn native_and_erc20_at_the_same_log_index_of_one_tx_are_both_credited() {
+    // A native transfer and an ERC-20 Transfer can both be log 0 of one tx. Keying by asset keeps
+    // both.
+    let mut c = ready(E18);
+    register_usdc(&mut c, E18);
+    let key = sk(9);
+    let from = address_of(&key);
+    assert!(deposit(&mut c, &from, 7, 0, "native", 10));
+    assert!(deposit(&mut c, &from, 7, 0, USDC_ADDR, 1_000_000));
+    assert_eq!(wallet_balance(&c, &key, ETH), 10);
+    assert_eq!(wallet_balance(&c, &key, USDC), 1_000_000);
+    assert!(!deposit(&mut c, &from, 7, 0, "native", 10), "native replay");
+    assert!(
+        !deposit(&mut c, &from, 7, 0, USDC_ADDR, 1_000_000),
+        "ERC-20 replay"
+    );
+}
+
+#[test]
+fn legacy_key_without_asset_still_blocks_replays_of_either_asset() {
+    // Deposits credited before the asset was in the key are recorded only under the old key.
+    let mut c = ready(E18);
+    register_usdc(&mut c, E18);
+    c.evm_deposits.insert((CHAIN, [7u8; 32], 3));
+    let key = sk(10);
+    let from = address_of(&key);
+    assert!(
+        !deposit(&mut c, &from, 7, 3, "native", 10),
+        "native replay of a legacy deposit"
+    );
+    assert!(
+        !deposit(&mut c, &from, 7, 3, USDC_ADDR, 1_000_000),
+        "ERC-20 replay of a legacy deposit"
+    );
+    assert_eq!(wallet_balance(&c, &key, ETH), 0);
+    assert_eq!(wallet_balance(&c, &key, USDC), 0);
+    assert!(
+        deposit(&mut c, &from, 7, 4, "native", 10),
+        "another log is new"
+    );
+    assert_eq!(wallet_balance(&c, &key, ETH), 10);
+}
+
 #[test]
 #[should_panic(expected = "is not registered")]
 fn deposit_rejects_an_unregistered_asset() {

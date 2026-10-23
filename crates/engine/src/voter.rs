@@ -57,6 +57,10 @@ pub type TokenId = u64;
 
 /// The fees and bribe voting rewards of one gauge (`gaugeToFees` / `gaugeToBribe`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct GaugeRewards {
     /// `FeesVotingReward`.
     pub fees: Reward,
@@ -66,6 +70,10 @@ pub struct GaugeRewards {
 
 /// State of the `Voter` contract. Field names mirror the Solidity state variables.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct Voter {
     /// The address of this contract, passed to the escrow as `voter` (`msg.sender` of `voting`).
     pub address: AccountId,
