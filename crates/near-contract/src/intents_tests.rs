@@ -560,3 +560,16 @@ fn intent_json_is_the_canonical_form() {
         "{\"AddLiquidity\":{\"token_in\":\"usdc.fakes.testnet\",\"amount_in\":\"5\",\"pool_id\":3,\"tick_lower\":-300,\"tick_upper\":300,\"min_liquidity\":\"0\"}}"
     );
 }
+
+/// The cancel message is shared with the relayer and the frontend; pin its exact text.
+#[test]
+fn cancel_intent_message_matches_relayer_and_frontend() {
+    let contract: near_sdk::AccountId = "windswapv4-btb.testnet".parse().unwrap();
+    let wallet: crate::accounts::WalletId = "evm:0x0d53794e20e0e4f96e07bcd8487ce557c6d9a4ac"
+        .parse()
+        .unwrap();
+    assert_eq!(
+        crate::accounts::cancel_intent_message(&contract, &wallet, 7, 1900000000, 3),
+        "Wind Swap v4 cancel intent 3 on windswapv4-btb.testnet by evm:0x0d53794e20e0e4f96e07bcd8487ce557c6d9a4ac nonce 7 expires 1900000000"
+    );
+}

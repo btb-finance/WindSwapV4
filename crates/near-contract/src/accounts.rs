@@ -211,7 +211,8 @@ pub fn intent_message(
     )
 }
 
-/// Builds the exact message a wallet signs to cancel intent `id` (see `cancel_intent`).
+/// Builds the exact message a wallet signs to cancel intent `id` (see `cancel_intent`). Must match
+/// the relayer (`tools/relayer/src/relay/service.ts`) and the frontend byte for byte.
 pub fn cancel_intent_message(
     contract: &AccountId,
     wallet: &WalletId,
@@ -220,7 +221,7 @@ pub fn cancel_intent_message(
     id: u64,
 ) -> String {
     format!(
-        "Wind Swap v4 cancel intent on {contract} by {wallet} nonce {nonce} expires {expires}: {id}"
+        "Wind Swap v4 cancel intent {id} on {contract} by {wallet} nonce {nonce} expires {expires}"
     )
 }
 
