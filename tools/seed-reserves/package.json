@@ -1,0 +1,1 @@
+{"name":"seed-reserves","private":true,"type":"module","scripts":{"compute":"node src/compute.ts"},"engines":{"node":">=22.18"}}
