@@ -100,3 +100,32 @@ describe("checkAction", () => {
     }
   });
 });
+
+describe("Distribute and permanent CreateLock (contract v7)", () => {
+  it("accepts the unit variant Distribute as a bare string", () => {
+    expect(checkAction("Distribute", "*")).toBe("Distribute");
+    // serde serialises a unit variant as a JSON string, so the signed text is "\"Distribute\"".
+    expect(JSON.stringify("Distribute")).toBe('"Distribute"');
+  });
+
+  it("rejects unknown strings and the object form of Distribute", () => {
+    expect(() => checkAction("Nope", "*")).toThrow(RelayError);
+    expect(() => checkAction({ Distribute: {} }, "*")).toThrow(RelayError);
+  });
+
+  it("respects the allow-list for Distribute", () => {
+    try {
+      checkAction("Distribute", ["Swap"]);
+      throw new Error("expected 403");
+    } catch (e) {
+      expect((e as RelayError).status).toBe(403);
+    }
+  });
+
+  it("accepts CreateLock with permanent omitted or true, rejects false and wrong order", () => {
+    expect(checkAction({ CreateLock: { amount: "1", duration: 604800 } }, "*")).toBe("CreateLock");
+    expect(checkAction({ CreateLock: { amount: "1", duration: 604800, permanent: true } }, "*")).toBe("CreateLock");
+    expect(() => checkAction({ CreateLock: { amount: "1", duration: 604800, permanent: false } }, "*")).toThrow(RelayError);
+    expect(() => checkAction({ CreateLock: { permanent: true, amount: "1", duration: 604800 } }, "*")).toThrow(RelayError);
+  });
+});

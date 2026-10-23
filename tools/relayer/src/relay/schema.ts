@@ -8,7 +8,10 @@ import { bad, RelayError } from "./errors.js";
 type FieldType =
   | "u64" | "i32" | "bool" | "string"
   | "u128" | "u256" | "i256"
-  | "u64[]" | "u128[]" | "string[]" | "hop[]";
+  | "u64[]" | "u128[]" | "string[]" | "hop[]"
+  // An optional trailing bool that the contract serialises only when true
+  // (`#[serde(default, skip_serializing_if = "is_false")]`): absent, or exactly `true`.
+  | "true?";
 
 export const SIGNED_ACTION_FIELDS: Readonly<Record<string, ReadonlyArray<readonly [string, FieldType]>>> = {
   Swap: [["pool_id", "u64"], ["zero_for_one", "bool"], ["amount_specified", "i256"], ["sqrt_price_limit_x96", "u256"]],
@@ -17,7 +20,7 @@ export const SIGNED_ACTION_FIELDS: Readonly<Record<string, ReadonlyArray<readonl
   BurnPosition: [["pool_id", "u64"], ["tick_lower", "i32"], ["tick_upper", "i32"], ["liquidity", "u128"]],
   Collect: [["pool_id", "u64"], ["tick_lower", "i32"], ["tick_upper", "i32"]],
   WithdrawEvm: [["token", "string"], ["amount", "u128"], ["to_chain_id", "u64"], ["to_address", "string"]],
-  CreateLock: [["amount", "u128"], ["duration", "u64"]],
+  CreateLock: [["amount", "u128"], ["duration", "u64"], ["permanent", "true?"]],
   IncreaseAmount: [["token_id", "u64"], ["amount", "u128"]],
   IncreaseUnlockTime: [["token_id", "u64"], ["duration", "u64"]],
   WithdrawLock: [["token_id", "u64"]],
@@ -37,6 +40,9 @@ export const SIGNED_ACTION_FIELDS: Readonly<Record<string, ReadonlyArray<readonl
   Bribe: [["pool_id", "u64"], ["token", "string"], ["amount", "u128"]],
   ClaimRebase: [["token_id", "u64"]],
 };
+
+/** Unit variants: serde serialises them as a bare JSON string, e.g. `"Distribute"`. */
+export const UNIT_ACTIONS: ReadonlyArray<string> = ["Distribute"];
 
 const HOP_FIELDS: ReadonlyArray<readonly [string, FieldType]> = [["pool_id", "u64"], ["token_in", "string"]];
 
@@ -61,6 +67,13 @@ export function isPlainObject(v: unknown): v is Record<string, unknown> {
  * fields in declaration order.
  */
 export function checkAction(action: unknown, allowed: readonly string[] | "*"): string {
+  if (typeof action === "string") {
+    if (!UNIT_ACTIONS.includes(action)) throw bad(`unknown action variant "${action}"`);
+    if (allowed !== "*" && !allowed.includes(action)) {
+      throw new RelayError(403, `action variant "${action}" is not accepted by this relayer`);
+    }
+    return action;
+  }
   if (!isPlainObject(action)) throw bad("action must be an object with exactly one variant key");
   const keys = Object.keys(action);
   if (keys.length !== 1) throw bad("action must be an object with exactly one variant key");
@@ -79,12 +92,16 @@ export function checkAction(action: unknown, allowed: readonly string[] | "*"): 
 }
 
 function checkFields(body: Record<string, unknown>, fields: ReadonlyArray<readonly [string, FieldType]>, path: string): void {
-  const want = fields.map(([name]) => name);
   const got = Object.keys(body);
+  // Optional trailing fields may be left out; everything present must be in declaration order.
+  const want = fields
+    .filter(([name, type]) => type !== "true?" || Object.prototype.hasOwnProperty.call(body, name))
+    .map(([name]) => name);
   if (got.length !== want.length || got.some((k, i) => k !== want[i])) {
     throw bad(`${path} fields must be exactly [${want.join(", ")}] in that order`);
   }
   for (const [name, type] of fields) {
+    if (type === "true?" && !Object.prototype.hasOwnProperty.call(body, name)) continue;
     checkValue(body[name], type, `${path}.${name}`);
   }
 }
@@ -101,6 +118,10 @@ function checkValue(v: unknown, type: FieldType, path: string): void {
       return;
     case "bool":
       if (typeof v !== "boolean") throw bad(`${path} must be a boolean`);
+      return;
+    case "true?":
+      // `false` is never serialised by the contract, so a signature over it could not verify.
+      if (v !== true) throw bad(`${path} must be omitted or true`);
       return;
     case "string":
       checkString(v, path);
