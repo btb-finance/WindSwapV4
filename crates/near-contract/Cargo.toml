@@ -12,6 +12,12 @@ publish = false
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Owner-only `test_credit` faucet. ON by default for the testnet demo.
+# Build mainnet with `--no-default-features` so the faucet is not compiled in.
+default = ["testnet-faucet"]
+testnet-faucet = []
+
 [dependencies]
 near-sdk = { workspace = true }
 windswap-engine = { path = "../engine", features = ["borsh"] }

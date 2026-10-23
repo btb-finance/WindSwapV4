@@ -1,13 +1,25 @@
 //! Wind Swap v4 NEAR contract, v0 (testnet demo).
 //!
 //! Thin wrapper around `windswap-engine`. Every pool operation is delegated to the engine;
-//! this crate only handles NEAR concerns: caller mapping, internal token balances, storage
-//! and panics. An engine `Err` becomes `env::panic_str`, which makes NEAR roll back the
-//! whole call.
+//! this crate only handles NEAR concerns: caller mapping, internal token balances, token
+//! deposits and withdrawals, storage and panics. An engine `Err` becomes `env::panic_str`,
+//! which makes NEAR roll back the whole call.
+//!
+//! Tokens:
+//! - A token id is the NEP-141 token contract's `AccountId` as a string (e.g. `usdc.fakes.testnet`).
+//! - Deposits: the owner whitelists tokens with `add_token`. A user sends tokens with
+//!   `ft_transfer_call` to this contract, which lands in `ft_on_transfer` and credits the
+//!   internal balance. Non-whitelisted tokens are refunded in full.
+//! - Withdrawals: `withdraw` debits the internal balance, then calls `ft_transfer`. If the
+//!   transfer fails, `on_withdraw` credits the balance back.
 //!
 //! v0 limitations (intentional, for the testnet demo):
-//! - No real token deposits or withdrawals. Balances are internal bookkeeping only;
-//!   `test_credit` is an owner-only faucet and must not exist in a production build.
+//! - `msg` in `ft_on_transfer` is ignored. An empty message is a plain deposit. It will carry
+//!   swap instructions later.
+//! - `create_pool` only checks that token ids parse as account ids. It does not require the
+//!   tokens to be whitelisted.
+//! - `test_credit` is an owner-only faucet, compiled only with the `testnet-faucet` feature
+//!   (on by default). Build mainnet with `--no-default-features`.
 //! - Each pool is one Borsh blob in `pools`. This is fine for v0 but should move to
 //!   per-tick / per-position storage later, since the blob grows with every tick.
 //! - Fees are the static `FeeConfig::default()`. There is no admin method to change them yet.
@@ -15,8 +27,11 @@
 //! - No Chain Signatures: the engine's `[u8; 32]` account id is `sha256(account_id)`.
 
 use near_sdk::json_types::U128;
-use near_sdk::store::{IterableMap, LookupMap};
-use near_sdk::{env, near, AccountId, BorshStorageKey, PanicOnDefault};
+use near_sdk::store::{IterableMap, IterableSet, LookupMap};
+use near_sdk::{
+    assert_one_yocto, env, ext_contract, near, AccountId, BorshStorageKey, Gas, NearToken,
+    PanicOnDefault, Promise, PromiseOrValue,
+};
 use windswap_engine::error::Result as EngineResult;
 use windswap_engine::fees::FeeConfig;
 use windswap_engine::pool::cl_pool::ClPool;
@@ -28,6 +43,8 @@ enum StorageKey {
     Pools,
     PoolTokens,
     Balances,
+    // Appended last so the prefixes of the existing collections do not change.
+    AllowedTokens,
 }
 
 #[near(contract_state)]
@@ -41,6 +58,20 @@ pub struct Contract {
     pool_tokens: LookupMap<u64, (String, String)>,
     next_pool_id: u64,
     /// Internal balances keyed by `(account, token id)`. Missing key means zero.
+    balances: LookupMap<(AccountId, String), u128>,
+    /// Tokens accepted by `ft_on_transfer`. Managed by the owner.
+    allowed_tokens: IterableSet<AccountId>,
+}
+
+/// State layout of the deployed testnet contract, before `allowed_tokens` was added.
+/// Only used by `migrate`. Field order and types must match the old deployment exactly.
+#[near(serializers = [borsh])]
+struct ContractV0 {
+    owner: AccountId,
+    fee_config: FeeConfig,
+    pools: IterableMap<u64, ClPool>,
+    pool_tokens: LookupMap<u64, (String, String)>,
+    next_pool_id: u64,
     balances: LookupMap<(AccountId, String), u128>,
 }
 
@@ -76,6 +107,20 @@ pub struct PositionView {
     pub tokens_owed1: U128,
 }
 
+/// The NEP-141 interface of a token contract, used for withdrawals.
+#[allow(dead_code)]
+#[ext_contract(ext_ft)]
+trait FungibleTokenCore {
+    fn ft_transfer(&mut self, receiver_id: AccountId, amount: U128, memo: Option<String>);
+}
+
+/// This contract's own callbacks.
+#[allow(dead_code)]
+#[ext_contract(ext_self)]
+trait SelfCallbacks {
+    fn on_withdraw(&mut self, account: AccountId, token: AccountId, amount: U128);
+}
+
 /// Maps a NEAR account to the engine's 32-byte account id.
 fn engine_account(account: &AccountId) -> [u8; 32] {
     env::sha256_array(account.as_bytes())
@@ -105,6 +150,13 @@ fn parse_u256(s: &str) -> U256 {
 fn parse_i256(s: &str) -> I256 {
     s.parse::<I256>()
         .unwrap_or_else(|_| env::panic_str(&format!("invalid I256: {s}")))
+}
+
+/// A token id must parse as a NEAR account id, since it is the token contract's account.
+fn validate_token_id(token: &str) {
+    if token.parse::<AccountId>().is_err() {
+        env::panic_str(&format!("invalid token id: {token}"));
+    }
 }
 
 impl Contract {
@@ -192,11 +244,32 @@ impl Contract {
             pool_tokens: LookupMap::new(StorageKey::PoolTokens),
             next_pool_id: 0,
             balances: LookupMap::new(StorageKey::Balances),
+            allowed_tokens: IterableSet::new(StorageKey::AllowedTokens),
+        }
+    }
+
+    /// Upgrade path from the v0 testnet state (no `allowed_tokens`). Run once right after
+    /// deploying this code over the old contract. The new `allowed_tokens` set starts empty,
+    /// so the owner must `add_token` again before deposits work. Only the contract account
+    /// can call it (`#[private]`).
+    #[private]
+    #[init(ignore_state)]
+    pub fn migrate() -> Self {
+        let old: ContractV0 =
+            env::state_read().unwrap_or_else(|| env::panic_str("no contract state to migrate"));
+        Self {
+            owner: old.owner,
+            fee_config: old.fee_config,
+            pools: old.pools,
+            pool_tokens: old.pool_tokens,
+            next_pool_id: old.next_pool_id,
+            balances: old.balances,
+            allowed_tokens: IterableSet::new(StorageKey::AllowedTokens),
         }
     }
 
     /// Owner only. Creates and initializes a pool for `(token0, token1)`. The tick spacing
-    /// must be enabled in the fee config.
+    /// must be enabled in the fee config. Token ids must parse as account ids.
     pub fn create_pool(
         &mut self,
         token0: String,
@@ -208,6 +281,8 @@ impl Contract {
         if token0 == token1 {
             env::panic_str("token0 and token1 must differ");
         }
+        validate_token_id(&token0);
+        validate_token_id(&token1);
         if !self
             .fee_config
             .tick_spacing_to_fee
@@ -229,7 +304,89 @@ impl Contract {
         pool_id
     }
 
-    /// Test-only faucet: credits an internal balance. Owner only.
+    /// Owner only. Adds `token` (a NEP-141 contract account) to the deposit whitelist.
+    pub fn add_token(&mut self, token: AccountId) {
+        self.assert_owner();
+        if !self.allowed_tokens.insert(token) {
+            env::panic_str("token already allowed");
+        }
+    }
+
+    /// Owner only. Removes `token` from the deposit whitelist. Existing balances of the token
+    /// can still be withdrawn. New deposits of it are refunded.
+    pub fn remove_token(&mut self, token: AccountId) {
+        self.assert_owner();
+        if !self.allowed_tokens.remove(&token) {
+            env::panic_str("token not allowed");
+        }
+    }
+
+    /// Tokens currently accepted for deposit.
+    pub fn get_tokens(&self) -> Vec<AccountId> {
+        self.allowed_tokens.iter().cloned().collect()
+    }
+
+    /// NEP-141 receiver hook, called by a token contract after `ft_transfer_call` to this
+    /// account. The predecessor is the token contract and `sender_id` is the account that
+    /// sent the tokens.
+    ///
+    /// For a whitelisted token, credits `sender_id` with `amount` and returns 0 (nothing
+    /// unused). For any other token, returns `amount` so the token contract refunds it.
+    ///
+    /// `msg` is ignored for now. An empty message is a plain deposit. It will carry swap
+    /// instructions in a later version.
+    #[allow(unused_variables)]
+    pub fn ft_on_transfer(
+        &mut self,
+        sender_id: AccountId,
+        amount: U128,
+        msg: String,
+    ) -> PromiseOrValue<U128> {
+        let token = env::predecessor_account_id();
+        if !self.allowed_tokens.contains(&token) {
+            return PromiseOrValue::Value(amount);
+        }
+        self.credit(&sender_id, token.as_str(), amount.0);
+        PromiseOrValue::Value(U128(0))
+    }
+
+    /// Withdraws `amount` of `token` from the caller's internal balance to the caller's
+    /// account on the token contract. Requires exactly 1 yoctoNEAR attached.
+    ///
+    /// The balance is debited before the transfer. `on_withdraw` credits it back if the
+    /// transfer fails. Withdrawals do not check the whitelist, so a delisted token's balance
+    /// can still be withdrawn.
+    #[payable]
+    pub fn withdraw(&mut self, token: AccountId, amount: U128) -> Promise {
+        assert_one_yocto();
+        if amount.0 == 0 {
+            env::panic_str("amount must be positive");
+        }
+        let account = env::predecessor_account_id();
+        self.debit(&account, token.as_str(), amount.0);
+        ext_ft::ext(token.clone())
+            .with_attached_deposit(NearToken::from_yoctonear(1))
+            .with_static_gas(Gas::from_tgas(5))
+            .ft_transfer(account.clone(), amount, None)
+            .then(
+                ext_self::ext(env::current_account_id())
+                    .with_static_gas(Gas::from_tgas(10))
+                    .on_withdraw(account, token, amount),
+            )
+    }
+
+    /// Callback for `withdraw`. Re-credits the balance if the `ft_transfer` failed.
+    #[private]
+    pub fn on_withdraw(&mut self, account: AccountId, token: AccountId, amount: U128) {
+        // `ft_transfer` returns nothing, so the only error here is a failed promise.
+        if env::promise_result_checked(0, usize::MAX).is_err() {
+            self.credit(&account, token.as_str(), amount.0);
+        }
+    }
+
+    /// Testnet-only faucet: credits an internal balance. Owner only. Compiled only with the
+    /// `testnet-faucet` feature (on by default). Mainnet builds must use `--no-default-features`.
+    #[cfg(feature = "testnet-faucet")]
     pub fn test_credit(&mut self, account_id: AccountId, token: String, amount: U128) {
         self.assert_owner();
         self.credit(&account_id, &token, amount.0);
