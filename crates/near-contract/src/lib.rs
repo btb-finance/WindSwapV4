@@ -23,8 +23,11 @@
 //!   wallet's owner instead of the sender.
 //!
 //! v0 limitations (intentional, for the testnet demo):
-//! - `ft_on_transfer` reads only `msg.owner`. Any other message is a plain deposit. Swap
-//!   instructions in `msg` come later.
+//! - `ft_on_transfer` reads `msg.owner`. A message with a `swap` or `add_liquidity` key runs
+//!   that one-step flow (see `oneclick`), and a failed one is refunded. Any other message is a
+//!   plain deposit.
+//! - EVM intents (v8): a wallet signs an intent once, and it runs from the owner's balance when
+//!   the relayer reports the deposit (see `intents`).
 //! - EVM deposits and withdrawals (v5): the relayer reports deposits with `report_evm_deposit`
 //!   and signs withdrawals with `process_withdrawal`. The owner registers EVM assets and chains.
 //!   See the "EVM bridge" section below.
@@ -62,6 +65,8 @@
 
 mod accounting;
 mod evm;
+mod intents;
+mod oneclick;
 mod permissionless;
 mod tokenomics;
 mod views;
@@ -143,6 +148,10 @@ enum StorageKey {
     StakesByOwner,
     WithdrawalsByOwner,
     BalanceTokensByOwner,
+    // Appended in v8 (one-step flows and intents). See `intents`.
+    Intents,
+    IntentsByOwner,
+    OpenIntents,
 }
 
 #[near(contract_state)]
@@ -239,6 +248,14 @@ pub struct Contract {
     withdrawals_by_owner: LookupMap<Owner, Vec<u64>>,
     /// Tokens with a nonzero internal balance, per owner.
     balance_tokens_by_owner: LookupMap<Owner, Vec<String>>,
+    // Appended in v8 (one-step flows and intents, see `intents`).
+    /// Intents by id.
+    intents: LookupMap<u64, intents::StoredIntent>,
+    next_intent_id: u64,
+    /// Every intent id per owner, in submission order.
+    intents_by_owner: LookupMap<Owner, Vec<u64>>,
+    /// Open intent ids per owner, oldest first. At most `intents::MAX_OPEN_INTENTS`.
+    open_intents: LookupMap<Owner, Vec<u64>>,
     // Appended in v8 (permissionless listing). See `permissionless`.
     permissionless: permissionless::Permissionless,
 }
@@ -390,7 +407,7 @@ pub struct PositionView {
 /// One hop of a multi-hop route as passed by the caller. `token_in` is the token paid into
 /// this hop. The output token is the other token of the pool.
 #[derive(Clone)]
-#[near(serializers = [json])]
+#[near(serializers = [json, borsh])]
 pub struct HopInput {
     pub pool_id: u64,
     /// Token id: a NEP-141 account id or a registered internal token id (e.g. `base-sepolia:eth`).
@@ -907,23 +924,33 @@ impl Contract {
     /// input token is not the previous hop's output, a token that is not in its pool, or an
     /// unknown pool.
     fn resolve_path(&self, path: &[HopInput]) -> Route {
+        self.try_resolve_path(path)
+            .unwrap_or_else(|e| env::panic_str(&e))
+    }
+
+    /// `resolve_path` that returns the reason instead of panicking. Changes nothing.
+    fn try_resolve_path(&self, path: &[HopInput]) -> Result<Route, String> {
         if path.is_empty() {
-            env::panic_str("empty path");
+            return Err("empty path".into());
         }
         let token_in = path[0].token_in.to_string();
         let mut current = token_in.clone();
         let mut hops = Vec::with_capacity(path.len());
         for (i, input) in path.iter().enumerate() {
             if input.token_in.as_str() != current.as_str() {
-                env::panic_str(&format!("discontinuous path at hop {i}"));
+                return Err(format!("discontinuous path at hop {i}"));
             }
-            let (token0, token1) = self.tokens_of(input.pool_id);
+            let (token0, token1) = self
+                .pool_tokens
+                .get(&input.pool_id)
+                .cloned()
+                .ok_or_else(|| format!("pool {} does not exist", input.pool_id))?;
             let (zero_for_one, token_out) = if current == token0 {
                 (true, token1)
             } else if current == token1 {
                 (false, token0)
             } else {
-                env::panic_str(&format!(
+                return Err(format!(
                     "token not in pool: {current} is not in pool {}",
                     input.pool_id
                 ));
@@ -934,11 +961,11 @@ impl Contract {
             });
             current = token_out;
         }
-        Route {
+        Ok(Route {
             hops,
             token_in,
             token_out: current,
-        }
+        })
     }
 
     /// Working copies of the pools a route touches. The route runs on these copies, and only a
@@ -1462,20 +1489,25 @@ impl Contract {
             stakes_by_owner: LookupMap::new(StorageKey::StakesByOwner),
             withdrawals_by_owner: LookupMap::new(StorageKey::WithdrawalsByOwner),
             balance_tokens_by_owner: LookupMap::new(StorageKey::BalanceTokensByOwner),
+            intents: LookupMap::new(StorageKey::Intents),
+            next_intent_id: 0,
+            intents_by_owner: LookupMap::new(StorageKey::IntentsByOwner),
+            open_intents: LookupMap::new(StorageKey::OpenIntents),
             permissionless: permissionless::Permissionless::new(),
         }
     }
 
-    /// Upgrade from the deployed v7 state to v8 (permissionless listing). Run once, as the init call
-    /// of the redeploy: `near contract deploy <acct> use-file <wasm> with-init-call migrate json-args '{}'`.
+    /// Upgrade from the layout on `main` (v8: one-step flows and intents) to the permissionless
+    /// layout. Run once, as the init call of the redeploy:
+    /// `near contract deploy <acct> use-file <wasm> with-init-call migrate json-args '{}'`.
     ///
-    /// Everything in v7 is kept. The new `permissionless` field starts with no default caps, and the
-    /// pool index is backfilled from the existing pools. Only the contract account can call it
-    /// (`#[private]`). See `permissionless::migrate_from_v7`.
+    /// Every field is kept as it is. The pool index and the pool summaries are backfilled from the
+    /// existing pools, and the default caps start unset. Only the contract account can call it
+    /// (`#[private]`). See `permissionless::migrate_from_v8`.
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
-        permissionless::migrate_from_v7()
+        permissionless::migrate_from_v8()
     }
 
     /// Owner only. Moves the v3 balances of the listed `(account, token)` pairs to their owner
@@ -1637,6 +1669,19 @@ impl Contract {
         let token = env::predecessor_account_id();
         if !self.allowed_tokens.contains(&token) {
             return PromiseOrValue::Value(amount);
+        }
+        // One-step flows (see `oneclick`). A plan that fails writes nothing and refunds the whole
+        // transfer, so a bad swap or zap never costs the sender anything.
+        if let Some(step) = oneclick::parse_one_step(&msg) {
+            let outcome =
+                step.and_then(|step| self.one_step(&sender_id, token.as_str(), amount.0, step));
+            return match outcome {
+                Ok(()) => PromiseOrValue::Value(U128(0)),
+                Err(reason) => {
+                    env::log_str(&format!("one-step transfer refunded: {reason}"));
+                    PromiseOrValue::Value(amount)
+                }
+            };
         }
         let parsed = parse_deposit_msg(&msg);
         let owner = match parsed.as_ref().and_then(|p| p.owner.as_ref()) {
@@ -2213,6 +2258,7 @@ impl Contract {
         }
         let owner = self.links.resolve(&WalletId::Evm(from));
         self.credit(&owner, &info.token_id, amount.0);
+        self.run_open_intent(owner, &info.token_id);
         env::log_str(&format!(
             "evm deposit: chain {chain_id} tx {} log {log_index}: {} {} from {}",
             evm::hex_0x(&hash),
@@ -2483,6 +2529,10 @@ pub mod accounts;
 mod accounts_tests;
 #[cfg(test)]
 mod bridge_tests;
+#[cfg(test)]
+mod intents_tests;
+#[cfg(test)]
+mod oneclick_tests;
 #[cfg(test)]
 mod permissionless_tests;
 #[cfg(test)]

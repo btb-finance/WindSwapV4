@@ -31,7 +31,7 @@ export interface NearConfig {
   contractId: string;
   relayerAccountId: string;
   credentialsPath: string;
-  gasTgas: { report: number; process: number; mark: number; execute: number };
+  gasTgas: { report: number; process: number; mark: number; execute: number; submitIntent: number; cancelIntent: number };
 }
 
 export interface RateLimitRule {
@@ -129,6 +129,8 @@ export function parseConfig(raw: unknown, env: NodeJS.ProcessEnv = process.env):
       process: typeof gasRaw.process === "number" ? gasRaw.process : 200,
       mark: typeof gasRaw.mark === "number" ? gasRaw.mark : 30,
       execute: typeof gasRaw.execute === "number" ? gasRaw.execute : 300,
+      submitIntent: typeof gasRaw.submitIntent === "number" ? gasRaw.submitIntent : 300,
+      cancelIntent: typeof gasRaw.cancelIntent === "number" ? gasRaw.cancelIntent : 300,
     },
   };
 

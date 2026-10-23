@@ -9,6 +9,7 @@ import {
   ed25519Signer,
   evmSigner,
   mockExecuteWriter,
+  mockIntentReader,
   relayCfg,
   signedEnvelope,
   type MockExecuteWriter,
@@ -30,6 +31,7 @@ function makeService(opts: {
     relayerAccountId: RELAYER,
     executeTgas: 300,
     writer,
+    reader: mockIntentReader(),
     log: recordingLog(),
     now: opts.now ?? (() => clock.t),
   } satisfies RelayServiceOptions);
@@ -204,6 +206,7 @@ describe("RelayService.execute", () => {
     let fail = true;
     const calls: unknown[] = [];
     const writer = {
+      ...mockExecuteWriter(),
       calls: calls as MockExecuteWriter["calls"],
       async executeAction(args: Parameters<MockExecuteWriter["executeAction"]>[0]) {
         calls.push(args);
@@ -224,6 +227,7 @@ describe("RelayService.execute", () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
     const writer = {
+      ...mockExecuteWriter(),
       calls: [] as MockExecuteWriter["calls"],
       async executeAction(args: Parameters<MockExecuteWriter["executeAction"]>[0]) {
         order.push(`start ${args.nonce}`);

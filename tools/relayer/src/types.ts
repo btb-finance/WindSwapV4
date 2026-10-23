@@ -105,12 +105,23 @@ export interface EvmReader {
   sendRawTransaction(raw: Hex): Promise<Hex>;
 }
 
+/** Row returned by the contract views `get_intent` and `get_intents_of_owner`. Only `id` and `status` are read here. */
+export interface IntentRecord {
+  id: number;
+  status?: string;
+  [field: string]: unknown;
+}
+
 export interface NearReader {
   getEvmAssets(): Promise<AssetInfo[]>;
   getEvmChain(chainId: number): Promise<EvmChainInfo | null>;
   getPendingWithdrawals(fromId: number, limit: number): Promise<WithdrawalRecord[]>;
   getSignedWithdrawals(fromId: number, limit: number): Promise<WithdrawalRecord[]>;
   getWithdrawal(id: number): Promise<WithdrawalRecord | null>;
+  /** Owner id (64 hex digits) that a wallet id acts for. */
+  resolveWallet(wallet: string): Promise<string>;
+  getIntent(id: number): Promise<IntentRecord | null>;
+  getIntentsOfOwner(owner: string, fromIndex: number, limit: number): Promise<IntentRecord[]>;
 }
 
 export interface ReportDepositArgs {
@@ -140,10 +151,32 @@ export interface ExecuteOutcome {
   result?: unknown;
 }
 
+/** Arguments of the contract's `submit_intent`. `intent` is forwarded exactly as received after checks. */
+export interface IntentSubmitArgs {
+  wallet: string;
+  intent: unknown;
+  nonce: number;
+  expires: number;
+  signature: string;
+}
+
+/** Arguments of the contract's `cancel_intent`. */
+export interface IntentCancelArgs {
+  wallet: string;
+  id: number;
+  nonce: number;
+  expires: number;
+  signature: string;
+}
+
 /** Change calls. Only constructed outside dry-run. */
 export interface NearWriter {
   /** Relays a signed action: functionCall `execute`, 0 deposit. Panics reject with the contract message. */
   executeAction(args: ExecuteArgs): Promise<ExecuteOutcome>;
+  /** functionCall `submit_intent`. `result` is the new intent id (u64). */
+  submitIntent(args: IntentSubmitArgs): Promise<ExecuteOutcome>;
+  /** functionCall `cancel_intent`. */
+  cancelIntent(args: IntentCancelArgs): Promise<ExecuteOutcome>;
   reportEvmDeposit(args: ReportDepositArgs): Promise<boolean>;
   processWithdrawal(args: { id: number; max_fee_per_gas: string; max_priority_fee_per_gas: string }): Promise<void>;
   markWithdrawalBroadcast(args: { id: number; tx_hash: Hex }): Promise<void>;

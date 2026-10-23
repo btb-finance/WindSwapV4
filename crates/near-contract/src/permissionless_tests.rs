@@ -467,7 +467,7 @@ fn register_token_refuses_a_whitelisted_token() {
 // ---- Migration from the deployed v7 layout ----
 
 #[test]
-fn migrate_from_v7_backfills_the_pool_index() {
+fn migrate_from_v8_backfills_the_pool_index() {
     let mut c = with_pair_tokens();
     ctx(OWNER, 0);
     c.add_token(acct("wind.testnet"));
@@ -486,7 +486,7 @@ fn migrate_from_v7_backfills_the_pool_index() {
     c.permissionless
         .pool_by_key
         .remove(&pool_key(WNEAR, FAKE, TICK_SPACING));
-    env::state_write(&permissionless::into_v7(c));
+    env::state_write(&permissionless::into_v8(c));
 
     let migrated = Contract::migrate();
     assert_eq!(
@@ -602,7 +602,7 @@ fn migrate_backfills_summaries_for_existing_pools() {
     ctx(OWNER, 0);
     c.add_token(acct(FAKE));
     c.create_pool(WNEAR.into(), FAKE.into(), TICK_SPACING, Q96_STR.into());
-    env::state_write(&permissionless::into_v7(c));
+    env::state_write(&permissionless::into_v8(c));
     let migrated = Contract::migrate();
     let s = migrated.get_pool_summary(0).expect("backfilled");
     assert_eq!(s.token1, FAKE);

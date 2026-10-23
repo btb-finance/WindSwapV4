@@ -797,10 +797,9 @@ fn owner_hex_of(name: &str) -> String {
     owner_hex(&owner_of_account(&acct(name)))
 }
 
-/// Writes the deployed v7 state: two balances, one pool, and three EVM withdrawals of which two are
-/// not yet broadcast. The pending totals are set as v7 holds them, and the state is migrated, so
-/// nothing is counted until touched or seeded.
-fn write_v6_state() {
+/// Writes the deployed state (the v8 layout on `main`): two balances, one pool, and three EVM
+/// withdrawals of which two are not yet broadcast. The seeding flag is set, as after a migration.
+fn write_v7_state() {
     let alice = owner_of_account(&acct(ALICE));
     let bob = owner_of_account(&acct(BOB));
     ctx(OWNER, T0, 0);
@@ -852,12 +851,12 @@ fn write_v6_state() {
     c.wind_genesis_done = true;
     c.wind_minted = 100 * E18;
     c.needs_seed = true;
-    env::state_write(&permissionless::into_v7(c));
+    env::state_write(&permissionless::into_v8(c));
 }
 
 #[test]
 fn migration_seeds_totals_once_and_counts_touched_keys_correctly() {
-    write_v6_state();
+    write_v7_state();
     ctx(SELF, T0, 0);
     let mut c = Contract::migrate();
 
@@ -931,7 +930,7 @@ fn migration_seeds_totals_once_and_counts_touched_keys_correctly() {
 #[test]
 #[should_panic(expected = "only owner")]
 fn seeding_is_owner_only() {
-    write_v6_state();
+    write_v7_state();
     ctx(SELF, T0, 0);
     let mut c = Contract::migrate();
     ctx(ALICE, T0, 0);
@@ -949,7 +948,7 @@ fn a_fresh_contract_has_nothing_to_seed() {
 #[test]
 #[should_panic(expected = "not a token of pool")]
 fn a_reserve_seed_must_name_a_token_of_the_pool() {
-    write_v6_state();
+    write_v7_state();
     ctx(SELF, T0, 0);
     let mut c = Contract::migrate();
     ctx(OWNER, T0, 0);

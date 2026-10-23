@@ -8,6 +8,9 @@ import type {
   EvmChainInfo,
   ExecuteArgs,
   ExecuteOutcome,
+  IntentCancelArgs,
+  IntentRecord,
+  IntentSubmitArgs,
   NearReader,
   NearWriter,
   ReportDepositArgs,
@@ -57,6 +60,10 @@ export function createNearReader(cfg: NearConfig, fetchImpl: typeof fetch = fetc
     getSignedWithdrawals: (fromId, limit) =>
       view<WithdrawalRecord[]>("get_signed_withdrawals", { from_id: fromId, limit }),
     getWithdrawal: (id) => view<WithdrawalRecord | null>("get_withdrawal", { id }),
+    resolveWallet: (wallet) => view<string>("resolve_wallet", { wallet }),
+    getIntent: (id) => view<IntentRecord | null>("get_intent", { id }),
+    getIntentsOfOwner: (owner, fromIndex, limit) =>
+      view<IntentRecord[]>("get_intents_of_owner", { owner, from_index: fromIndex, limit }),
   };
 }
 
@@ -99,26 +106,31 @@ export function createNearWriter(cfg: NearConfig): NearWriter {
     return JSON.parse(Buffer.from(success, "base64").toString("utf8")) as unknown;
   }
 
+  /** A signed-relay call: throws on a failed outcome, returns the tx hash and the decoded return value. */
+  async function signedCall(methodName: string, args: Record<string, unknown>, tgas: number): Promise<ExecuteOutcome> {
+    const outcome = await account.functionCall({
+      contractId: cfg.contractId,
+      methodName,
+      args,
+      gas: BigInt(tgas) * TGAS,
+      attachedDeposit: 0n,
+    });
+    const failure = failureText(outcome.status);
+    if (failure !== null) throw new Error(failure);
+    const txHash = (outcome as { transaction?: { hash?: string } }).transaction?.hash;
+    if (!txHash) throw new Error("NEAR outcome has no transaction hash");
+    const success = (outcome.status as { SuccessValue?: string }).SuccessValue;
+    const result =
+      success === undefined || success === ""
+        ? undefined
+        : (JSON.parse(Buffer.from(success, "base64").toString("utf8")) as unknown);
+    return result === undefined ? { txHash } : { txHash, result };
+  }
+
   return {
-    async executeAction(args: ExecuteArgs): Promise<ExecuteOutcome> {
-      const outcome = await account.functionCall({
-        contractId: cfg.contractId,
-        methodName: "execute",
-        args: { ...args },
-        gas: BigInt(cfg.gasTgas.execute) * TGAS,
-        attachedDeposit: 0n,
-      });
-      const failure = failureText(outcome.status);
-      if (failure !== null) throw new Error(failure);
-      const txHash = (outcome as { transaction?: { hash?: string } }).transaction?.hash;
-      if (!txHash) throw new Error("NEAR outcome has no transaction hash");
-      const success = (outcome.status as { SuccessValue?: string }).SuccessValue;
-      const result =
-        success === undefined || success === ""
-          ? undefined
-          : (JSON.parse(Buffer.from(success, "base64").toString("utf8")) as unknown);
-      return result === undefined ? { txHash } : { txHash, result };
-    },
+    executeAction: (args: ExecuteArgs) => signedCall("execute", { ...args }, cfg.gasTgas.execute),
+    submitIntent: (args: IntentSubmitArgs) => signedCall("submit_intent", { ...args }, cfg.gasTgas.submitIntent),
+    cancelIntent: (args: IntentCancelArgs) => signedCall("cancel_intent", { ...args }, cfg.gasTgas.cancelIntent),
     async reportEvmDeposit(args: ReportDepositArgs) {
       const value = await change("report_evm_deposit", { ...args }, cfg.gasTgas.report);
       return value === true;

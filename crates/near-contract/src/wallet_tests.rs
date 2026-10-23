@@ -364,7 +364,7 @@ fn deposit_with_invalid_owner_panics_so_it_is_refunded() {
 #[test]
 fn deposit_with_other_msg_still_credits_sender() {
     let mut c = setup();
-    deliver(&mut c, USDC, BOB, 9, "{\"swap\":true}".into());
+    deliver(&mut c, USDC, BOB, 9, "{\"hello\":true}".into());
     assert_eq!(balance(&c, BOB, USDC), 9);
 }
 

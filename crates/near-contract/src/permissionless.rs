@@ -16,7 +16,8 @@
 //! itself by calling the deposit hooks. Permissionless listing is therefore only as safe as the
 //! token contract. See docs/testnet.md, "Permissionless listing".
 //!
-//! The state is the v7 layout plus one field, `permissionless`. `migrate_from_v7` reads the v7 layout
+//! The state is the v8 layout (`main`: one-step flows and intents) plus one field, `permissionless`.
+//! `migrate_from_v8` reads the v8 layout
 //! and backfills the pool index from the existing pools.
 
 use super::*;
@@ -165,11 +166,11 @@ pub fn pool_key(token0: &str, token1: &str, tick_spacing: i32) -> PoolKey {
     }
 }
 
-/// The state layout of the deployed v7 contract. It is the `Contract` struct before the
-/// `permissionless` field. Only `migrate_from_v7` reads it. Field order and types must match the
-/// deployed state exactly.
+/// The state layout of the v8 contract: `Contract` before the `permissionless` field, so the layout
+/// on `main` (one-step flows and intents). Only `migrate_from_v8` reads it. Field order and types
+/// must match the deployed state exactly.
 #[near(serializers = [borsh])]
-pub(crate) struct ContractV7 {
+pub(crate) struct ContractV8 {
     owner: AccountId,
     fee_config: FeeConfig,
     /// One Borsh blob per pool (v0). See the module docs.
@@ -261,15 +262,23 @@ pub(crate) struct ContractV7 {
     withdrawals_by_owner: LookupMap<Owner, Vec<u64>>,
     /// Tokens with a nonzero internal balance, per owner.
     balance_tokens_by_owner: LookupMap<Owner, Vec<String>>,
+    // Appended in v8 (one-step flows and intents, see `intents`).
+    /// Intents by id.
+    intents: LookupMap<u64, intents::StoredIntent>,
+    next_intent_id: u64,
+    /// Every intent id per owner, in submission order.
+    intents_by_owner: LookupMap<Owner, Vec<u64>>,
+    /// Open intent ids per owner, oldest first. At most `intents::MAX_OPEN_INTENTS`.
+    open_intents: LookupMap<Owner, Vec<u64>>,
 }
 
-/// Reads the v7 state and returns the v8 contract. The pool index is backfilled from the existing
+/// Reads the v8 state and returns the permissionless contract. The pool index is backfilled from the existing
 /// pools, lowest id first, so the first pool of a pair and tick spacing keeps the key. Later duplicates
 /// stay in place and are not indexed.
-/// The v7 state of a v8 contract: every field but `permissionless`. Test fixtures use it to write
-/// the deployed layout before `migrate_from_v7` runs.
+/// The v8 state of a permissionless contract: every field but `permissionless`. Test fixtures use it to
+/// write the layout on `main` before `migrate_from_v8` runs.
 #[cfg(test)]
-pub(crate) fn into_v7(c: Contract) -> ContractV7 {
+pub(crate) fn into_v8(c: Contract) -> ContractV8 {
     let Contract {
         owner,
         fee_config,
@@ -315,9 +324,13 @@ pub(crate) fn into_v7(c: Contract) -> ContractV7 {
         stakes_by_owner,
         withdrawals_by_owner,
         balance_tokens_by_owner,
+        intents,
+        next_intent_id,
+        intents_by_owner,
+        open_intents,
         permissionless: _,
     } = c;
-    ContractV7 {
+    ContractV8 {
         owner,
         fee_config,
         pools,
@@ -362,11 +375,15 @@ pub(crate) fn into_v7(c: Contract) -> ContractV7 {
         stakes_by_owner,
         withdrawals_by_owner,
         balance_tokens_by_owner,
+        intents,
+        next_intent_id,
+        intents_by_owner,
+        open_intents,
     }
 }
 
-pub(crate) fn migrate_from_v7() -> Contract {
-    let old: ContractV7 =
+pub(crate) fn migrate_from_v8() -> Contract {
+    let old: ContractV8 =
         env::state_read().unwrap_or_else(|| env::panic_str("no contract state to migrate"));
     let mut contract = Contract {
         owner: old.owner,
@@ -413,6 +430,10 @@ pub(crate) fn migrate_from_v7() -> Contract {
         stakes_by_owner: old.stakes_by_owner,
         withdrawals_by_owner: old.withdrawals_by_owner,
         balance_tokens_by_owner: old.balance_tokens_by_owner,
+        intents: old.intents,
+        next_intent_id: old.next_intent_id,
+        intents_by_owner: old.intents_by_owner,
+        open_intents: old.open_intents,
         permissionless: Permissionless::new(),
     };
     let mut ids: Vec<u64> = contract.pools.keys().copied().collect();

@@ -260,7 +260,22 @@ Wasm 1.35 MB, SHA-256 `0440420b8ab8da78a937e5add4d4f84bc9bbabfb1766511807708d8bb
 Pending: `seed_pool_reserves` (pool-held amounts must be computed off-chain from pool state), so per-token
 `pool_reserves` read 0 and `migrated: true` until seeded.
 
-## v8: permissionless listing (not deployed)
+### v7 seeding + solvency (2026-10-23)
+
+`tools/seed-reserves` (read-only) computed pool holdings from pool state (tick math cross-checked against every pool's
+slot0 and liquidity) and the missing pre-v7 balance (the voter's 5 tUSDC bribe). Seeded with `seed_accounting` (1 new key)
+and `seed_pool_reserves` (10 pool/token entries). On-chain `check_solvency` afterwards:
+
+| Token | held (token contract) | owed (balances + pools + locked) | solvent |
+|---|---|---|---|
+| tUSDC | 110.000000000000000001 | 110.000000000000000001 | ✅ |
+| tWETH | 120.000000000000000001 | 120.000000000000000001 | ✅ |
+| WIND | 1,000,000 | 1,000,000 | ✅ |
+
+EVM assets are checked off-chain against the Base vault: test1 matches to 1 wei; the vault holds ~0.07 ETH more than
+owed (the initial 0.1 ETH funding of the vault was never credited to anyone), so it is solvent.
+
+## v9: permissionless listing (not deployed)
 
 Status: code and tests on branch `agent/permissionless`. Not deployed. The wasm size and hash are
 recorded at deploy time.
@@ -283,8 +298,8 @@ Anyone can use the contract without owner registration. Owner-only calls that st
 
 1. Build: `cargo build -p windswap-near --release --target wasm32-unknown-unknown`.
 2. Deploy with the init call: `near contract deploy <acct> use-file <wasm> with-init-call migrate json-args '{}'`.
-   The state must be the v7 layout (the testnet state after the v7 upgrade). A v6 state needs the v7
-   upgrade first.
+   The state must be the layout on `main` (v8: one-step flows and intents). A v7 state needs `main`'s
+   migrate first.
 3. `migrate` backfills the pool index and the pool summaries from the existing pools (lowest id first).
    `created_at` is the migration time for those pools, and swap counters start at zero.
 4. Then the owner: `set_default_caps`, and `set_evm_asset_verified` for the major tokens.

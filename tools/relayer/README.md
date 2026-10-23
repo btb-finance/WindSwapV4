@@ -33,7 +33,7 @@ The file's `account_id` must match `near.relayerAccountId`. Only `run` and `once
 | `npm run start` | Loop forever: deposits, then withdrawals, every `pollIntervalMs`. `SIGINT` stops after the current batch. |
 | `npm run once` | One pass, then exit. Exit code 1 if any stage reported an error. |
 | `npm run once -- --dry-run` | No NEAR or EVM writes, no state writes. Prints what it would report, process and broadcast. |
-| `npm run serve` | HTTP relay only. `POST /v1/execute` submits a wallet-signed action to `execute` on NEAR, paying the gas from the relayer account. Listens on `relay.host`:`relay.port` (default `127.0.0.1:8787`). |
+| `npm run serve` | HTTP relay only. `POST /v1/execute` submits a wallet-signed action to `execute` on NEAR, and `POST /v1/intent` submits a signed swap or add-liquidity intent to `submit_intent`, paying the gas from the relayer account. Listens on `relay.host`:`relay.port` (default `127.0.0.1:8787`). |
 | `npm run start -- --http` | Watcher loop and the HTTP relay in one process. |
 
 Flags (all optional):
@@ -97,7 +97,7 @@ Config is JSON (see `config/relayer.example.json`). Env overrides for the NEAR s
 | `near.contractId` | Wind Swap v4 contract, e.g. `windswapv4-btb.testnet`. |
 | `near.relayerAccountId` | Account that signs change calls. Must be registered with `add_relayer`. |
 | `near.credentialsPath` | Keychain JSON for that account. `~` is expanded. |
-| `near.gasTgas` | Gas per change call in TGas: `report` 50, `process` 200, `mark` 30 by default. `process_withdrawal` needs at least 150. |
+| `near.gasTgas` | Gas per change call in TGas: `report` 50, `process` 200, `mark` 30, `execute` 300, `submitIntent` 300, `cancelIntent` 300 by default. `process_withdrawal` needs at least 150. |
 | `evm[]` | One entry per chain: `name` (state file name), `chainId`, `rpcUrl`, `vault`, `confirmations`, `startBlock`, `scanBatchSize`, `requestsPerSecond`, `blockConcurrency`. |
 | `evm[].maxFeePerGasCapFallback` | Dry-run only. Used if the contract view `get_evm_chain` is unavailable. |
 | `pollIntervalMs` | Sleep between passes in `run` mode. |
@@ -126,7 +126,11 @@ of `scanBatchSize` blocks:
 Each batch's deposits are reported in block order. The cursor moves only after the whole batch
 is reported. Then:
 
-- `true` from the contract: reported.
+- `true` from the contract: reported. The watcher then reads the sender's owner
+  (`resolve_wallet("evm:<from>")`) and the first page of its intents (`get_intents_of_owner`, 50 rows)
+  and logs `intent status` for each intent whose status changed since this process last saw it. The
+  contract executes an open intent inside `report_evm_deposit`, so the log shows the result of that
+  call. A failed read is logged as a warning and does not change the deposit outcome.
 - `false`: already reported, counted as a duplicate. This is what makes re-runs safe.
 - Contract panic (for example, over the per-deposit cap): the deposit is written to `quarantined` in
   the state file and the cursor still advances. It is not retried automatically. An operator must
@@ -200,10 +204,35 @@ Endpoints (all JSON; the frontend calls these from `NEXT_PUBLIC_V4_RELAY_URL`):
 | Route | Request | Response |
 | --- | --- | --- |
 | `POST /v1/execute` | `{"contractId":"windswapv4-btb.testnet","method":"execute","args":{"wallet","action","nonce","expires","signature"}}` | `200 {"txHash","result"}`; `result` is the contract's `ActionResult`. Errors: `4xx/5xx {"error":"..."}`. |
+| `POST /v1/intent` | `{"wallet","intent","nonce","expires","signature"}` (or `{"contractId","method":"submit_intent","args":{...}}`) | `200 {"txHash","intentId"}`; `intentId` is the `u64` that `submit_intent` returns. |
+| `POST /v1/intent/cancel` | `{"wallet","id","nonce","expires","signature"}` (or `{"contractId","method":"cancel_intent","args":{...}}`) | `200 {"txHash","result"}`. |
+| `GET /v1/intent/:id` | | The `get_intent` view record as returned by the contract. `404 {"error":"intent not found"}` when absent. No gas. Rate-limited per IP like `nonce-hint`. |
 | `GET /v1/health` | | `{"ok":true,"contractId","relayerAccountId"}` |
 | `GET /v1/nonce-hint?wallet=<optional>` | | `{"nonce"}`: a fresh suggestion. Any value unused for that wallet works. |
 
-The bare `args` object (without the envelope) is also accepted.
+The bare `args` object (without the envelope) is also accepted on every POST route.
+
+Intent fields:
+
+- `intent`: externally tagged, one of two variants. **Keys must be in exactly the order below**
+  (checked in `src/relay/schema.ts`, `INTENT_FIELDS`). Amounts are decimal strings.
+  - `{"Swap":{"token_in","amount_in","path":[{"pool_id","token_in"}],"min_amount_out","to"}}`
+  - `{"AddLiquidity":{"token_in","amount_in","pool_id","tick_lower","tick_upper","min_liquidity"}}`
+  - `to` is `"internal"`, `"near:<account>"` (lowercase NEAR account id, 2 to 64 characters), or
+    `"evm:0x<40 lowercase hex>"`. Anything else is a 400.
+- Signed message for `POST /v1/intent` (EIP-191 `personal_sign` for `evm:0x...`, raw Ed25519 bytes for `ed25519:...`):
+  `Wind Swap v4 intent on <contract> by <wallet> nonce <n> expires <t>: <JSON.stringify(intent)>`
+- Signed message for `POST /v1/intent/cancel`:
+  `Wind Swap v4 cancel intent <id> on <contract> by <wallet> nonce <n> expires <t>`
+- Nonces are shared with `execute` per wallet. An intent and an action with the same nonce conflict (409).
+- The same checks as `/v1/execute` apply: expiry (at most `relay.maxExpirySeconds` ahead), canonical wallet,
+  signature over the message, rate limits, idempotency (an identical retry returns the stored result),
+  and the daily gas budget (`near.gasTgas.submitIntent` / `cancelIntent` TGas each). `allowedActions`
+  does not apply to intents.
+
+Errors on `/v1/intent` and `/v1/intent/cancel` follow the same mapping as `/v1/execute`: 400 for
+validation and contract panics, 409 for a reused nonce with a different body, 429, 503 for the gas budget,
+502 for a NEAR RPC failure (retrying with the same nonce is safe).
 
 Request fields, matching the contract's `execute`:
 
@@ -220,7 +249,8 @@ The signed message is exactly
 because the contract re-serialises the parsed action and the signature covers that byte string.
 Amounts are decimal strings (U128/U256/I256), not JSON numbers.
 
-Checks run in this order, and nothing reaches NEAR until all of them pass:
+Checks run in this order, and nothing reaches NEAR until all of them pass (intents follow the same order,
+with `checkIntent` in place of the action check):
 
 1. Per-IP rate limit (429 with `Retry-After`).
 2. Body size (413), JSON, envelope and field shape, and the contract id and method.
@@ -292,9 +322,33 @@ src/evm.ts         viem reader (rate-limited) and tx hash helper
 src/near.ts        NEAR views (JSON-RPC) and change calls, incl. execute (near-js)
 src/runner.ts      one pass across chains, plus the loop
 src/http.ts        HTTP relay server: routes, body limit, CORS, error mapping
-src/relay/         execute path: service (checks, queue, idempotency), schema (SignedAction
-                   field table), wallet (canonical ids, EVM and Ed25519 verify), limits (token
-                   buckets, daily gas budget), errors
+src/relay/         execute and intent paths: service (checks, queue, idempotency), schema
+                   (SignedAction and Intent field tables, `to` format), wallet (canonical ids,
+                   EVM and Ed25519 verify), limits (token buckets, daily gas budget), errors
 src/cli.ts         CLI entry point
 tests/             vitest, mocked RPC and NEAR, no network, no real transactions
 ```
+
+## Intent flow end to end
+
+Swap and add-liquidity intents are executed by the contract when the deposit that funds them arrives.
+The relayer submits the intent, watches the vault, and then relays the payout.
+
+1. **Sign intent.** The wallet (EVM or Ed25519) signs the intent message above. The nonce is unused for
+   the wallet, and `expires` is within `maxExpirySeconds`.
+2. **POST /v1/intent.** The relay checks the body, the schema and the signature, then calls `submit_intent`
+   (300 TGas, paid by the relayer). The response carries the `intentId`. The intent stays open until a
+   matching deposit is credited.
+3. **Send tokens on Base to the vault.** The deposit comes from the address the watcher resolves to the
+   intent owner (`resolve_wallet("evm:<from>")`), so for an EVM wallet send from that same address.
+   Deposits are scanned after `confirmations`.
+4. **Watcher reports.** The deposit watcher calls `report_evm_deposit`. The contract credits the owner and
+   executes open intents for `token_in`. The watcher logs `intent status` for the owner's intents.
+5. **Contract executes.** The contract runs the intent and records the result. A payout that leaves the
+   contract is created as a `PendingWithdrawal`, which the relayer processes in step 6. An intent that
+   did not execute stays open, and `execute_intent({id})` retries it.
+6. **Payout broadcast.** The withdrawal pipeline in this README (`process_withdrawal`, then the MPC-signed
+   broadcast) sends the payout on the destination chain.
+
+Cancel a still-open intent with `POST /v1/intent/cancel`. Follow its status with `GET /v1/intent/:id`.
+
