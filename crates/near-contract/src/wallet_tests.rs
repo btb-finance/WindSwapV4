@@ -20,6 +20,11 @@ const MIN_LIMIT: &str = "4295128740";
 const FUNDS: u128 = 1_000_000_000_000_000_000_000_000; // 1e24
 const LIQUIDITY: u128 = 1_000_000_000_000_000_000; // 1e18
 const TO_ADDRESS: &str = "0x2222222222222222222222222222222222222222";
+/// The internal id of the registered native Base Sepolia ETH asset.
+const ETH: &str = "base-sepolia:eth";
+const BASE_SEPOLIA: u64 = 84532;
+const RELAYER: &str = "relayer.testnet";
+const DEPOSIT_TX: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
 /// Times in unix seconds used by the tests. The block time is `NOW`.
 const NOW: u64 = 1_000;
 const EXPIRES: u64 = 2_000;
@@ -121,6 +126,35 @@ fn evm_action_sig(
     let json = near_sdk::serde_json::to_string(action).unwrap();
     let msg = action_message(&acct(contract), &evm_wallet(key), nonce, expires, &json);
     format!("0x{}", hex(&evm_sign(key, &msg)))
+}
+
+/// Registers native Base Sepolia ETH, a relayer, and the chain's signing settings.
+fn register_eth(c: &mut Contract) {
+    ctx(OWNER, NOW, 0);
+    c.register_evm_asset(
+        BASE_SEPOLIA,
+        "native".into(),
+        ETH.into(),
+        18,
+        U128(FUNDS),
+        U128(FUNDS),
+    );
+    c.add_relayer(acct(RELAYER));
+}
+
+/// The relayer reports a native ETH deposit of `amount` from the EVM `wallet` (`evm:0x…`).
+fn report_eth_deposit(c: &mut Contract, wallet: &str, amount: u128) {
+    ctx(RELAYER, NOW, 0);
+    let from = wallet.strip_prefix("evm:").unwrap();
+    let credited = c.report_evm_deposit(
+        BASE_SEPOLIA,
+        DEPOSIT_TX.into(),
+        0,
+        from.into(),
+        "native".into(),
+        U128(amount),
+    );
+    assert!(credited);
 }
 
 fn key_wallet(key: &SigningKey) -> String {
@@ -409,13 +443,14 @@ fn execute_withdraw_evm_debits_and_records_pending_withdrawal() {
     let mut c = setup();
     let key = sk(52);
     let wallet = key_wallet(&key);
-    deposit_for(&mut c, BOB, &wallet, USDC, 100);
+    register_eth(&mut c);
+    report_eth_deposit(&mut c, &wallet, 100);
     let owner = c.resolve_wallet(wallet.clone());
 
     let action = SignedAction::WithdrawEvm {
-        token: USDC.into(),
+        token: ETH.into(),
         amount: U128(40),
-        to_chain_id: 84532,
+        to_chain_id: BASE_SEPOLIA,
         to_address: TO_ADDRESS.into(),
     };
     let sig = evm_action_sig(&key, SELF, &action, 1, EXPIRES);
@@ -425,13 +460,33 @@ fn execute_withdraw_evm_debits_and_records_pending_withdrawal() {
         _ => panic!("expected a withdrawal id"),
     }
 
-    assert_eq!(owner_balance(&c, &owner, USDC), 60);
-    let record = c.get_pending_withdrawal(0).expect("recorded");
-    assert_eq!(record.owner, owner);
-    assert_eq!(record.token, USDC);
+    assert_eq!(owner_balance(&c, &owner, ETH), 60);
+    let record = c.get_withdrawal(0).expect("recorded");
+    assert_eq!(record.owner_hex, owner);
+    assert_eq!(record.token_id, ETH);
     assert_eq!(record.amount.0, 40);
-    assert_eq!(record.to_chain_id, 84532);
+    assert_eq!(record.to_chain_id, BASE_SEPOLIA);
     assert_eq!(record.to_address, TO_ADDRESS);
+    assert_eq!(record.status, "Pending");
+}
+
+#[test]
+#[should_panic(expected = "is on chain 84532, not 1")]
+fn execute_withdraw_evm_rejects_wrong_chain() {
+    let mut c = setup();
+    let key = sk(57);
+    let wallet = key_wallet(&key);
+    register_eth(&mut c);
+    report_eth_deposit(&mut c, &wallet, 100);
+    let action = SignedAction::WithdrawEvm {
+        token: ETH.into(),
+        amount: U128(40),
+        to_chain_id: 1,
+        to_address: TO_ADDRESS.into(),
+    };
+    let sig = evm_action_sig(&key, SELF, &action, 1, EXPIRES);
+    ctx(BOB, NOW + 20, 0);
+    c.execute(wallet, action, 1, EXPIRES, sig);
 }
 
 #[test]
@@ -465,11 +520,12 @@ fn execute_rejects_nonce_replay() {
     let mut c = setup();
     let key = sk(55);
     let wallet = key_wallet(&key);
-    deposit_for(&mut c, BOB, &wallet, USDC, 1_000);
+    register_eth(&mut c);
+    report_eth_deposit(&mut c, &wallet, 1_000);
     let action = SignedAction::WithdrawEvm {
-        token: USDC.into(),
+        token: ETH.into(),
         amount: U128(1),
-        to_chain_id: 1,
+        to_chain_id: BASE_SEPOLIA,
         to_address: TO_ADDRESS.into(),
     };
     let sig = evm_action_sig(&key, SELF, &action, 1, EXPIRES);
