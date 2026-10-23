@@ -1204,3 +1204,14 @@ fn whitelisted_trader_pays_zero_fee() {
     let out = c.swap_exact_input(path, U128(AMOUNT_IN), U128(0)).0;
     assert_eq!(out, zero_fee_out);
 }
+
+/// Regression (found by the solvency review): a route larger than the pool's liquidity used to
+/// debit the full `amount_in` while the pool consumed only part of it. It must now panic, so
+/// NEAR reverts the call and the trader keeps their balance.
+#[test]
+#[should_panic(expected = "InsufficientLiquidity")]
+fn swap_exact_input_beyond_liquidity_panics() {
+    let (mut c, p0, _p1) = two_pools();
+    // p0 holds ~3e16 of USDC depth in its ±600 range; BOB sells 1e17.
+    c.swap_exact_input(vec![hop_in(p0, USDC)], U128(TRADER_FUNDS / 10), U128(0));
+}

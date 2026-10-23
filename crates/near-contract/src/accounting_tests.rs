@@ -271,6 +271,14 @@ impl Sim {
             let amount = self.rng.range(E18 / 1_000, E18 / 5);
             self.ensure(user, token_in, amount);
             ctx(user, self.now, 0);
+            // Routes that would run out of liquidity now revert (InsufficientLiquidity) instead
+            // of charging for unconsumed input; skip them, as a panicking call changes nothing.
+            let quote = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.c.quote_exact_input(path.clone(), U128(amount)).0
+            }));
+            if quote.is_err() {
+                return;
+            }
             let out = self.c.swap_exact_input(path, U128(amount), U128(0)).0;
             self.l.sub(user, token_in, amount);
             self.l.add(user, token_out, out);

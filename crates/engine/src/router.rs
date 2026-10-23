@@ -151,8 +151,15 @@ impl<S: PoolStore> Router<'_, S> {
     ) -> Result<U256> {
         let mut amount = amount_in;
         for hop in path {
-            let result = self.swap_hop(work, *hop, to_i256(amount)?)?;
-            let (_, received) = hop_amounts(*hop, result);
+            let requested = to_i256(amount)?;
+            let result = self.swap_hop(work, *hop, requested)?;
+            let (paid, received) = hop_amounts(*hop, result);
+            // The pool stops early at the price limit when it runs out of liquidity. SwapRouter
+            // would only pull what was consumed; here the caller is charged `amount_in` up
+            // front, so a partial fill must revert or the unconsumed input would be lost.
+            if paid != requested {
+                return Err(MathError::InsufficientLiquidity);
+            }
             amount = non_negative(received)?;
         }
         Ok(amount)

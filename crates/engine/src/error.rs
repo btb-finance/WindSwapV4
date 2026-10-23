@@ -185,6 +185,10 @@ pub enum MathError {
     UpdatePeriod,
     /// `RewardsDistributor`: a payout to an owner of address zero (OZ `ERC20: transfer to the zero address`).
     TransferToZeroAddress,
+    /// `Router` exact input: the pool could not consume the whole input before reaching the
+    /// price limit (not enough liquidity), so the swap reverts instead of charging for
+    /// input it did not use.
+    InsufficientLiquidity,
 }
 
 impl fmt::Display for MathError {

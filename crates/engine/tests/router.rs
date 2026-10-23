@@ -289,3 +289,38 @@ fn invalid_paths_are_rejected_without_changes() {
     assert_eq!(quote, MathError::InvalidInput);
     assert_eq!(s, before);
 }
+
+/// Regression: an exact-input swap larger than the pool's liquidity used to stop at the price
+/// limit while the caller was charged the full `amount_in`. It must revert and change nothing.
+#[test]
+fn exact_input_partial_fill_reverts_and_changes_nothing() {
+    let mut s = store();
+    let before = s.clone();
+    let fees = fees();
+    let mut router = Router {
+        store: &mut s,
+        fees: &fees,
+        trader: TRADER,
+        time: TIME,
+    };
+    // The pool holds ~0.35e18 of token0 depth in its range; ask to sell 10e18.
+    let path = [Hop {
+        pool_id: POOL_AB,
+        zero_for_one: true,
+    }];
+    let err = router
+        .exact_input(&path, amount(10 * LIQUIDITY), U256::ZERO)
+        .unwrap_err();
+    assert_eq!(err, MathError::InsufficientLiquidity);
+    assert_eq!(s, before);
+    // A swap that fits still works.
+    let mut router = Router {
+        store: &mut s,
+        fees: &fees,
+        trader: TRADER,
+        time: TIME,
+    };
+    assert!(router
+        .exact_input(&path, amount(LIQUIDITY / 1_000), U256::ZERO)
+        .is_ok());
+}
