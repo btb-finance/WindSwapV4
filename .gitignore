@@ -5,3 +5,5 @@ diff-tests/cache/
 .env
 *.pem
 node_modules/
+sdk/node_modules/
+sdk/dist/
