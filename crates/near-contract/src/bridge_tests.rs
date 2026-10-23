@@ -920,3 +920,12 @@ fn withdraw_evm_refunds_nothing_when_the_relayer_never_signs() {
     assert_eq!(balance(&c, ALICE, ETH), 0);
     assert_eq!(c.get_withdrawal(id).unwrap().status, "Pending");
 }
+
+/// Regression (found on testnet): multi-hop paths must accept internal token ids such as
+/// `base-sepolia:eth`, which are not valid NEAR account ids.
+#[test]
+fn hop_input_accepts_internal_token_ids() {
+    let hop: crate::HopInput =
+        near_sdk::serde_json::from_str(r#"{"pool_id":3,"token_in":"base-sepolia:eth"}"#).unwrap();
+    assert_eq!(hop.token_in, "base-sepolia:eth");
+}

@@ -916,7 +916,7 @@ fn two_pools() -> (Contract, u64, u64) {
 fn hop_in(pool_id: u64, token_in: &str) -> HopInput {
     HopInput {
         pool_id,
-        token_in: acct(token_in),
+        token_in: token_in.to_string(),
     }
 }
 

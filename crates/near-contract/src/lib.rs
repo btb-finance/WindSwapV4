@@ -325,7 +325,8 @@ pub struct PositionView {
 #[near(serializers = [json])]
 pub struct HopInput {
     pub pool_id: u64,
-    pub token_in: AccountId,
+    /// Token id: a NEP-141 account id or a registered internal token id (e.g. `base-sepolia:eth`).
+    pub token_in: String,
 }
 
 /// An action a wallet signs and anyone may relay through `execute`.
