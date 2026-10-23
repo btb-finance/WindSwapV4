@@ -138,3 +138,22 @@ status success, block 0x2ecd268, from `0xaa817ca355475d22d5a410f401dc877ec401259
 | Total supply | 0 (minted only by the contract's Minter at epoch flips, once wired) |
 | Check | `mint` from any other account panics `Only the minter can mint` |
 | Wasm SHA-256 | `a2036647ff5845639ddee4938cff372390196563df0dc74e40cfdc5e9566cb79` |
+
+## v4: one account every chain — MetaMask-only user (2026-10-23)
+
+Redeployed with `migrate` (v3 → owner-keyed balances + persisted wallet links); `migrate_balances` moved the 4 known
+legacy balances (user tUSDC/tWETH, owner tusdc/tweth). Wasm SHA-256 `28f7ead8222ed04f657f0a2d7f196c0df54062de9e530cec3fd62098a969cca8` (580.3 KB).
+
+Test with an EVM-only wallet `0x70997970c51812dc3a010c7d01b50e0d17dc79c8` (Hardhat test key #1, testnet only),
+signing with viem exactly like MetaMask `personal_sign`; every NEAR transaction relayed by `windswapv4-user.testnet`:
+
+| Step | Result |
+|---|---|
+| `resolve_wallet("evm:0x7099…79c8")` | owner `590247d8…0ab3f7` |
+| deposit 20 tUSDC + 20 tWETH via `ft_transfer_call` msg `{"owner":"evm:0x7099…"}` | credited to the wallet's account |
+| `execute` **MintPosition** pool 1, ±600, L = 1e20 (MetaMask-signed) | paid 4.1549 tUSDC + 1.7699 tWETH |
+| `execute` **Swap** 1 tUSDC → tWETH (MetaMask-signed) | received 0.97339 tWETH |
+| replay the same signed action (same nonce) | rejected: `action nonce was already used for this wallet` |
+| final balances | 14.8451 tUSDC, 19.2035 tWETH — exactly 20 − LP − swap in (+ swap out) |
+
+Signed message format: `Wind Swap v4 action on windswapv4-btb.testnet by evm:0x… nonce N expires T: {"Swap":{…}}` (EIP-191).
