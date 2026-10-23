@@ -153,6 +153,8 @@ fn report_eth_deposit(c: &mut Contract, wallet: &str, amount: u128) {
         from.into(),
         "native".into(),
         U128(amount),
+        None,
+        None,
     );
     assert!(credited);
 }

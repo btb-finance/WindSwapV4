@@ -136,6 +136,8 @@ export interface MockReaderOpts {
   blockError?: Error;
   baseFee?: bigint;
   priorityFee?: bigint;
+  /** Token metadata by lowercase address. An absent token reads as null (decimals() reverts). */
+  tokenMeta?: Record<string, { decimals: number; symbol: string }>;
 }
 
 export interface MockReader extends EvmReader {
@@ -163,6 +165,9 @@ export function mockReader(opts: MockReaderOpts): MockReader {
     },
     async transferLogs(from, to) {
       return (opts.logs ?? []).filter((l) => l.blockNumber >= from && l.blockNumber <= to);
+    },
+    async tokenMeta(token) {
+      return opts.tokenMeta?.[token.toLowerCase()] ?? null;
     },
     async nonce(_addr, tag) {
       if (tag === "pending") return opts.pendingNonce ?? 0;

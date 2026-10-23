@@ -1,5 +1,8 @@
 import {
   createPublicClient,
+  decodeAbiParameters,
+  encodeFunctionData,
+  hexToString,
   http,
   keccak256,
   numberToHex,
@@ -9,7 +12,36 @@ import {
 } from "viem";
 import type { EvmChainConfig } from "./config.js";
 import { TRANSFER_TOPIC } from "./deposits.js";
-import type { BlockTx, EvmReader, Hex, RawLog } from "./types.js";
+import type { BlockTx, EvmReader, Hex, RawLog, TokenMeta } from "./types.js";
+
+const DECIMALS_FN = { type: "function", name: "decimals", stateMutability: "view", inputs: [], outputs: [{ type: "uint8" }] } as const;
+const SYMBOL_FN = { type: "function", name: "symbol", stateMutability: "view", inputs: [], outputs: [{ type: "string" }] } as const;
+
+/**
+ * Decodes the raw return data of `symbol()`. Most tokens return a string. Older ones (MKR-style)
+ * return a bytes32 with the symbol left-aligned. Anything else gives "".
+ */
+export function decodeSymbolResult(data: Hex): string {
+  if (data.length === 66) {
+    return hexToString(data).replace(/\0+$/, "").trim();
+  }
+  try {
+    const [s] = decodeAbiParameters([{ type: "string" }], data);
+    return s.trim();
+  } catch {
+    return "";
+  }
+}
+
+/** `decimals()` as a uint8, or null if the data is not one. */
+export function decodeDecimalsResult(data: Hex): number | null {
+  try {
+    const [d] = decodeAbiParameters([{ type: "uint8" }], data);
+    return Number(d);
+  } catch {
+    return null;
+  }
+}
 
 interface RpcLog {
   address: Hex;
@@ -81,6 +113,33 @@ export function createEvmReader(chain: EvmChainConfig): EvmReader {
         if (err instanceof Error && err.name === "TransactionReceiptNotFoundError") return null;
         throw err;
       }
+    },
+
+    async tokenMeta(token: Hex): Promise<TokenMeta | null> {
+      await gate();
+      let decimals: number | null;
+      try {
+        const r = await client.call({
+          to: token as ViemHex,
+          data: encodeFunctionData({ abi: [DECIMALS_FN], functionName: "decimals" }),
+        });
+        decimals = r.data && r.data !== "0x" ? decodeDecimalsResult(r.data as Hex) : null;
+      } catch {
+        return null;
+      }
+      if (decimals === null) return null;
+      let symbol = "";
+      try {
+        await gate();
+        const r = await client.call({
+          to: token as ViemHex,
+          data: encodeFunctionData({ abi: [SYMBOL_FN], functionName: "symbol" }),
+        });
+        symbol = r.data && r.data !== "0x" ? decodeSymbolResult(r.data as Hex) : "";
+      } catch {
+        symbol = "";
+      }
+      return { decimals, symbol };
     },
 
     async transferLogs(fromBlock: bigint, toBlock: bigint): Promise<RawLog[]> {

@@ -72,6 +72,8 @@ fn deposit_eth(c: &mut Contract, key: &SigningKey, amount: u128, block_secs: u64
         address_of(key),
         "native".into(),
         U128(amount),
+        None,
+        None,
     )
 }
 

@@ -392,6 +392,7 @@ impl Contract {
         }
         self.write_back(pools);
         self.route_reserves(&flows);
+        self.count_swaps(&flows);
         self.deliver(trader, &route.token_out, amount_out, to);
     }
 
@@ -647,6 +648,10 @@ impl Contract {
         self.reserve_in(Flow::Mint, plan.pool_id, &plan.token_in, plan.used_in);
         self.reserve_in(Flow::Mint, plan.pool_id, &plan.token_out, plan.used_out);
         self.pools.insert(plan.pool_id, plan.pool);
+        self.touch_pool(plan.pool_id);
+        if plan.spent_in > 0 {
+            self.count_swaps(&plan.flows);
+        }
         self.has_state.insert(owner);
         self.sync_position_index(owner, plan.pool_id, plan.tick_lower, plan.tick_upper);
 

@@ -684,3 +684,19 @@ fn one_step_flows_keep_the_totals_equal_to_the_holdings() {
     assert_owed(&c, USDC, held_usdc);
     assert_owed(&c, WNEAR, held_wnear);
 }
+
+#[test]
+fn a_one_step_swap_is_counted_in_the_pool_summary() {
+    let mut c = setup();
+    let pool = usdc_wnear_pool(&mut c);
+    let amount = 1_000_000u128;
+    let path = vec![hop(pool, USDC)];
+    assert_eq!(c.get_pool_summary(pool).unwrap().swap_count, 0);
+
+    let refund = deliver_msg(&mut c, USDC, BOB, amount, &swap_msg(&path, 1, None));
+    assert_eq!(refund, 0);
+    let s = c.get_pool_summary(pool).unwrap();
+    assert_eq!(s.swap_count, 1);
+    assert_eq!(s.volume0.0, amount, "token0 in is the amount paid in");
+    assert!(s.volume1.0 > 0, "token1 out is counted too");
+}

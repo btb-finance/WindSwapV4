@@ -292,3 +292,60 @@ token contract refunded — wallet unchanged.
 
 Ops note: the public `rpc.testnet.near.org` returned HTTP 429 to the relayer; switched its config to
 `https://rpc.testnet.fastnear.com`. The frontend should do the same (with fallbacks) — same cause as "Failed to fetch".
+
+## v9: permissionless listing (not deployed)
+
+Status: code and tests on branch `agent/permissionless`. Not deployed. The wasm size and hash are
+recorded at deploy time.
+
+Anyone can use the contract without owner registration. Owner-only calls that stay: `add_token`,
+`set_evm_chain`, `enable_tick_spacing`, `set_default_caps`, `set_evm_asset_verified`,
+`register_evm_asset`, the seeds and backfills.
+
+| Change | What it does |
+|---|---|
+| Auto-registration of ERC-20s | `report_evm_deposit(..., decimals?, symbol?)`: an unregistered ERC-20 on an enabled chain is registered on its first report, with the owner's default caps and `verified: false`. Needs `decimals` (0–36) or the report returns `false` with a log. `native` is never auto-registered. A disabled chain still panics `is not registered`. |
+| Token ids | Auto id `evm:{chain_id}:{address}`, derived from the address, so a look-alike token gets its own id. Existing ids (`base-sepolia:eth`) are unchanged. |
+| Default caps | `set_default_caps(per_deposit_cap, daily_withdraw_cap)`, owner. Until set, no ERC-20 is auto-registered. `get_default_caps`. |
+| Verified flag | `get_evm_assets` / `get_evm_asset` return `verified` and `symbol`. An asset with no listing entry (owner-registered) reads as verified. `set_evm_asset_verified(chain_id, asset, verified)`, owner. |
+| Permissionless pools | `create_pool` callable by anyone when both tokens are known (whitelisted NEP-141 or registered EVM asset). A non-owner attaches at least `POOL_STORAGE_DEPOSIT` = 0.1 NEAR. It stays in the contract, and any excess is refunded (detached transfer). The owner needs no deposit. One pool per (sorted pair, tick spacing): `create_pool` panics with the existing id otherwise. `get_pool_id(token0, token1, tick_spacing)`. |
+| Pool summaries | `get_pools(from_index, limit)` (limit capped at 100) and `get_pool_summary(pool_id)` read only a small `PoolSummary` per pool: tokens, tick spacing, fee, price, tick, liquidity, fee growth, `has_gauge`, `created_at`, `swap_count`, `volume0`, `volume1`. Every pool write refreshes it. |
+| NEP-141 listing | `register_token(token)`, anyone, attached deposit `REGISTER_TOKEN_DEPOSIT` = 0.01 NEAR (kept on success). Calls `ft_metadata` and whitelists the token if it succeeds and `decimals <= 36`. Failure refunds. |
+
+### Migration
+
+1. Build: `cargo build -p windswap-near --release --target wasm32-unknown-unknown`.
+2. Deploy with the init call: `near contract deploy <acct> use-file <wasm> with-init-call migrate json-args '{}'`.
+   The state must be the layout on `main` (v8: one-step flows and intents). A v7 state needs `main`'s
+   migrate first.
+3. `migrate` backfills the pool index and the pool summaries from the existing pools (lowest id first).
+   `created_at` is the migration time for those pools, and swap counters start at zero.
+4. Then the owner: `set_default_caps`, and `set_evm_asset_verified` for the major tokens.
+
+### Frontend and relayer changes
+
+- `get_pools` now returns `PoolSummary` (not `PoolView`). Use `get_pool` for the full state of one pool.
+- `get_evm_assets` items have two new fields, `verified` and `symbol`. Show unverified tokens as such.
+- `create_pool` from a non-owner needs the 0.1 NEAR deposit. Check `get_pool_id` first, since a
+  duplicate panics.
+- `report_evm_deposit` has two new optional arguments. The relayer sends them only for auto-registration.
+- Relayer config: `evm[].autoRegister` (default `false`) and `evm[].denyTokens` (lower-case addresses).
+  With auto-registration on, the watcher reads `decimals()` and `symbol()` through the token. A token
+  whose decimals cannot be read is ignored with a warning, and a report is not sent.
+
+### Trust note (read before enabling auto-registration)
+
+The contract trusts what the relayer reports, and an ERC-20 or NEP-141 token is code that can say
+anything. These are not guarded by this change:
+
+- **EVM.** A token contract can emit `Transfer` logs to the vault without moving any tokens. The
+  relayer reports those logs as real. The credit is then backed by nothing, and the caps only bound
+  each report. Unverified tokens are credited the same way as verified ones.
+- **NEP-141.** `ft_on_transfer` trusts its predecessor. Any contract that is whitelisted can call it
+  with any amount. `register_token` lets anyone whitelist their own contract, so the credit can be
+  unbacked.
+
+Unbacked credit can be swapped out of any pool that holds that token and a real token, once a pool
+exists for it. Permissionless pool creation makes that easy. Before enabling this on a network that
+holds value, decide on a guard. Options: pools only for verified tokens, `register_token` tokens
+not poolable until the owner verifies them, or a relayer-side check that is stronger than the log.

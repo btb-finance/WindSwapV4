@@ -9,6 +9,9 @@ export interface AssetInfo {
   decimals: number;
   per_deposit_cap: string;
   daily_withdraw_cap: string;
+  /** False for an auto-registered token until the owner verifies it. */
+  verified?: boolean;
+  symbol?: string;
 }
 
 /** Result of the contract view `get_evm_chain`. */
@@ -63,6 +66,16 @@ export interface DepositCandidate {
   amount: bigint;
   blockNumber: bigint;
   transactionIndex: number;
+  /** Set only for an unregistered ERC-20 that the relayer auto-registers. */
+  decimals?: number;
+  symbol?: string;
+}
+
+/** Metadata of an ERC-20 read from the token contract. */
+export interface TokenMeta {
+  decimals: number;
+  /** Informational. Empty when the symbol cannot be read. */
+  symbol: string;
 }
 
 export interface TransferEvent {
@@ -83,6 +96,8 @@ export interface EvmReader {
   receiptStatus(txHash: Hex): Promise<"success" | "reverted" | null>;
   /** All ERC-20-shaped Transfer logs with `to == vault` in the inclusive range. */
   transferLogs(fromBlock: bigint, toBlock: bigint): Promise<RawLog[]>;
+  /** `decimals()` and `symbol()` of a token. Null if `decimals()` reverts or is not a uint8. */
+  tokenMeta(token: Hex): Promise<TokenMeta | null>;
   nonce(address: Hex, blockTag: "latest" | "pending"): Promise<number>;
   feeData(): Promise<{ baseFeePerGas: bigint; priorityFeePerGas: bigint }>;
   /** True if the node knows the transaction (mempool or mined). */
@@ -116,6 +131,9 @@ export interface ReportDepositArgs {
   from: Hex;
   asset: string;
   amount: string;
+  /** Sent only with an auto-registration (unregistered ERC-20). */
+  decimals?: number;
+  symbol?: string;
 }
 
 /** Arguments of the contract's `execute`, forwarded as received after relay-side checks. */

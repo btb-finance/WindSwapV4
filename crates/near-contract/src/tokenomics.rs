@@ -410,6 +410,7 @@ impl Contract {
             is_pool: true,
         };
         self.gauges.insert(pool_id, ClGauge::new(config));
+        self.touch_pool(pool_id);
         gauge
     }
 
@@ -605,12 +606,14 @@ impl Contract {
             let (c0, c1) = ok_dbg(nft.collect(pool, owner, token_id, u128::MAX, u128::MAX, time));
             (liquidity, c0, c1)
         };
+        self.touch_pool(pool_id);
         // Re-mint the same liquidity into the owner's own range.
         let (m0, m1) = {
             let pool = self.pool_mut(pool_id);
             let (m0, m1) = ok(pool.mint(owner, tick_lower, tick_upper, liquidity, time));
             (to_u128(m0), to_u128(m1))
         };
+        self.touch_pool(pool_id);
         self.reserve_out(Flow::Unstake, pool_id, &token0, c0);
         self.reserve_out(Flow::Unstake, pool_id, &token1, c1);
         self.reserve_in(Flow::Unstake, pool_id, &token0, m0);
@@ -868,6 +871,7 @@ impl Contract {
         };
         self.gauges.insert(pool, gauge_state);
         self.pools.insert(pool, pool_state);
+        self.touch_pool(pool);
         self.debit(&voter_id(), &wind, amount);
         self.reserve_in(Flow::EmissionIn, pool, &wind, amount);
         let (fees0, fees1) = (to_u128(fees0), to_u128(fees1));

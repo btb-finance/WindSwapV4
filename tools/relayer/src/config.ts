@@ -17,6 +17,13 @@ export interface EvmChainConfig {
   blockConcurrency: number;
   /** Dry-run only: fee cap used when the contract view get_evm_chain is unavailable. */
   maxFeePerGasCapFallback?: string;
+  /**
+   * Register unknown ERC-20 tokens that send to the vault, reading decimals and symbol from the
+   * token. Off by default. The contract only accepts it on an enabled chain.
+   */
+  autoRegister?: boolean;
+  /** Lowercase token addresses never auto-registered (their deposits are ignored). */
+  denyTokens?: Hex[];
 }
 
 export interface NearConfig {
@@ -67,6 +74,16 @@ export interface RelayerConfig {
 }
 
 const HEX_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+
+/** A list of 0x addresses, lower-cased. Absent means empty. */
+function denyList(v: unknown, path: string): Hex[] {
+  if (v === undefined) return [];
+  if (!Array.isArray(v)) throw new Error(`${path} must be an array of addresses`);
+  return v.map((a, i) => {
+    if (typeof a !== "string" || !HEX_ADDRESS.test(a)) throw new Error(`${path}[${i}] is not a 0x address`);
+    return a.toLowerCase() as Hex;
+  });
+}
 
 function obj(v: unknown, path: string): Record<string, unknown> {
   if (typeof v !== "object" || v === null || Array.isArray(v)) throw new Error(`${path} must be an object`);
@@ -135,6 +152,11 @@ export function parseConfig(raw: unknown, env: NodeJS.ProcessEnv = process.env):
     };
     const cap = optStr(o, "maxFeePerGasCapFallback");
     if (cap !== undefined) cfg.maxFeePerGasCapFallback = cap;
+    if (o.autoRegister !== undefined && typeof o.autoRegister !== "boolean") {
+      throw new Error(`evm[${i}].autoRegister must be true or false`);
+    }
+    cfg.autoRegister = o.autoRegister === true;
+    cfg.denyTokens = denyList(o.denyTokens, `evm[${i}].denyTokens`);
     return cfg;
   });
   const names = new Set(evm.map((c) => c.name));
