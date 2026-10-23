@@ -65,3 +65,32 @@ Results:
 | collect | burn amounts + fees: +0.0003 tUSDC, +0.0006 tWETH (exactly 0.03% of each swap) |
 | final balances | 1000 − 3 wei each: rounding dust stays in the pool, as in Uniswap v3 |
 | swap with amount 0 | panics `ZeroAmount`, call rolled back |
+
+## v1: real NEP-141 tokens (2026-10-23)
+
+Upgraded in place with `with-init-call migrate` (state from v0 kept; pool 0 still at tick 200).
+
+| Account | Role |
+|---|---|
+| `windswapv4-btb.testnet` | Wind Swap v4 contract (owner) |
+| `windswapv4-tusdc.testnet` | Test token tUSDC (NEP-141, `crates/test-token`, owner `mint` faucet) |
+| `windswapv4-tweth.testnet` | Test token tWETH |
+| `windswapv4-user.testnet` | Test user |
+
+Wasm SHA-256 `445a2eaf73dac29f130b708c708d2f5eecdf31983550b39b92614cf5fd85af70` (383.6 KB).
+
+Flow tested as `windswapv4-user.testnet` on pool 1 (tUSDC/tWETH, tick spacing 3, price 1):
+
+| Step | Call | Result |
+|---|---|---|
+| whitelist | owner `add_token` ×2 | ok |
+| deposit | user `ft_transfer_call` 100 of each to the DEX (1 yocto) | DEX balance 100 / 100 |
+| add liquidity | `mint_position` ±600, L = 5e20 | paid 14.7765 / 14.7765 |
+| swap exact in | 5 tUSDC → tWETH | received 4.9490 tWETH |
+| swap exact out | exactly 1 tUSDC out | paid 0.98254 tWETH |
+| burn half | `burn_position` 2.5e20 | 9.3875 tUSDC + 5.4049 tWETH owed |
+| collect | `collect` | burn amounts + accrued fees |
+| withdraw | `withdraw` 10 tUSDC (1 yocto) | wallet 900 → 910 tUSDC, DEX balance −10 |
+
+Note: the DEX account must be registered with each token contract (storage) before withdrawals;
+the test-token faucet `mint` registers accounts automatically.
