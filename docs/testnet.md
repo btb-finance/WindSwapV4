@@ -110,3 +110,19 @@ Redeployed without migration (state layout unchanged). Wasm SHA-256
 | same swap with `min_amount_out` = 2 | panics `TooLittleReceived`, rolled back |
 
 Path format: `[{"pool_id":1,"token_in":"windswapv4-tusdc.testnet"},{"pool_id":2,"token_in":"windswapv4-tweth.testnet"}]`.
+
+## v3: contract-initiated Chain Signatures (2026-10-23)
+
+Redeployed with `with-init-call migrate` (v1 layout → adds `mpc_contract`, default `v1.signer-prod.testnet`).
+Wasm SHA-256 `03890a393061cc9a81ac4e2f8a4b23da5ea264292e37d15ad21f833157b818c5` (480.0 KB). User balances unchanged.
+
+| | |
+|---|---|
+| Contract's derived EVM address (path `ethereum-1`) | `0xaa817ca355475d22d5a410f401dc877ec401259e` |
+| Call | `request_evm_payout` chain 84532 (Base Sepolia), nonce 0, 0.000001 ETH to `0x…dEaD`, 21000 gas |
+| Time | ~9 s end-to-end via CLI (contract → MPC sign → callback) |
+| Result | signed EIP-1559 raw tx `0x02f872…` returned by `on_evm_signed` |
+| Verification | `tools/chainsig-probe/payout-check.mjs`: signer recovers to the derived address, low-s, valid parity — PASS |
+
+Not broadcast: the derived address has no Base Sepolia ETH yet. Fund it from a Base Sepolia faucet, then broadcast the
+raw tx with any RPC (`eth_sendRawTransaction`) to complete a real cross-chain payout.
