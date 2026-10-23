@@ -465,43 +465,47 @@ fn withdraw_works_after_token_is_removed() {
     assert_eq!(balance(&c, ALICE, USDC), 0);
 }
 
-// ---- Upgrade from the deployed layout (ContractV4) ----
+// ---- Upgrade from the deployed layout (ContractV5) ----
 
 #[test]
-fn migrate_reads_deployed_v4_state() {
+fn migrate_reads_deployed_v5_state() {
     set_ctx(OWNER, 1_000);
     let bob_owner = owner_of_account(&acct(BOB));
     let alice_owner = owner_of_account(&acct(ALICE));
     {
-        // Write the deployed (v4) layout, with the same storage prefixes as the testnet contract.
+        // Write the deployed (v5) layout, with the same storage prefixes as the testnet contract.
         let mut legacy_balances = LookupMap::new(StorageKey::Balances);
         legacy_balances.insert((acct(ALICE), USDC.to_string()), 42u128);
         let mut balances = LookupMap::new(StorageKey::OwnerBalances);
         balances.insert((bob_owner, USDC.to_string()), 7u128);
         let mut allowed_tokens = IterableSet::new(StorageKey::AllowedTokens);
         allowed_tokens.insert(acct(USDC));
-        let mut pending_withdrawals = LookupMap::new(StorageKey::PendingWithdrawals);
-        pending_withdrawals.insert(
+        let mut withdrawals = LookupMap::new(StorageKey::Withdrawals);
+        withdrawals.insert(
             0u64,
-            PendingWithdrawal {
+            Withdrawal {
                 owner: alice_owner,
-                token: "base-sepolia:eth".to_string(),
+                token_id: "base-sepolia:eth".to_string(),
                 amount: 5,
                 to_chain_id: 84532,
                 to_address: [0x22; 20],
+                status: WithdrawalStatus::Pending,
+                signing_nonce: None,
             },
         );
-        pending_withdrawals.insert(
+        withdrawals.insert(
             1u64,
-            PendingWithdrawal {
+            Withdrawal {
                 owner: bob_owner,
-                token: "base-sepolia:eth".to_string(),
+                token_id: "base-sepolia:eth".to_string(),
                 amount: 9,
                 to_chain_id: 84532,
                 to_address: [0x33; 20],
+                status: WithdrawalStatus::Pending,
+                signing_nonce: None,
             },
         );
-        let old = ContractV4 {
+        let old = ContractV5 {
             owner: acct(OWNER),
             fee_config: FeeConfig::default(),
             pools: IterableMap::new(StorageKey::Pools),
@@ -513,8 +517,14 @@ fn migrate_reads_deployed_v4_state() {
             mpc_contract: acct("mpc.example.testnet"),
             links: LinkRegistry::new("links"),
             action_nonces: LookupSet::new(StorageKey::ActionNonces),
-            pending_withdrawals,
+            withdrawals,
             next_withdrawal_id: 2,
+            relayers: IterableSet::new(StorageKey::Relayers),
+            evm_assets: IterableMap::new(StorageKey::EvmAssets),
+            evm_asset_by_token: LookupMap::new(StorageKey::EvmAssetByToken),
+            evm_chains: LookupMap::new(StorageKey::EvmChains),
+            evm_deposits: LookupSet::new(StorageKey::EvmDeposits),
+            has_state: LookupSet::new(StorageKey::HasState),
         };
         env::state_write(&old);
     }
@@ -539,8 +549,8 @@ fn migrate_reads_deployed_v4_state() {
     assert_eq!(balance(&c, ALICE, USDC), 42);
     assert_eq!(c.migrate_balances(vec![(acct(ALICE), USDC.into())]), 0);
 
-    // Pending withdrawals are copied as Pending with the same ids and fields.
-    let first = c.get_withdrawal(0).expect("copied");
+    // Pending withdrawals are kept with the same ids and fields.
+    let first = c.get_withdrawal(0).expect("kept");
     assert_eq!(first.status, "Pending");
     assert_eq!(first.owner_hex, owner_hex(&alice_owner));
     assert_eq!(first.token_id, "base-sepolia:eth");
@@ -549,11 +559,18 @@ fn migrate_reads_deployed_v4_state() {
         first.to_address,
         "0x2222222222222222222222222222222222222222"
     );
-    assert_eq!(c.get_withdrawal(1).expect("copied").amount.0, 9);
+    assert_eq!(c.get_withdrawal(1).expect("kept").amount.0, 9);
     assert!(c.get_withdrawal(2).is_none());
     assert_eq!(c.get_pending_withdrawals(0, 10).len(), 2);
 
     // The new state starts empty.
+    assert_eq!(
+        c.get_epoch().active_period,
+        0,
+        "epochs start at the migration time"
+    );
+    assert_eq!(c.get_epoch().epoch_count, 0);
+    assert!(c.get_locks_of(owner_hex(&bob_owner)).is_empty());
     assert!(c.get_relayers().is_empty());
     assert!(c.get_evm_assets().is_empty());
     assert!(c.get_evm_chain(84532).is_none());
@@ -562,6 +579,11 @@ fn migrate_reads_deployed_v4_state() {
     set_ctx(USDC, 1_000);
     let _ = c.ft_on_transfer(acct(ALICE), U128(8), String::new());
     assert_eq!(balance(&c, ALICE, USDC), 50);
+
+    // The ve(3,3) state can be set up after the migration.
+    set_ctx(OWNER, 1_000);
+    c.set_wind_token(acct("wind.testnet"));
+    assert_eq!(c.get_epoch().wind_minted.0, 0);
 }
 
 #[test]

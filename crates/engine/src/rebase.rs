@@ -52,6 +52,10 @@ impl Payout {
 
 /// State of the `RewardsDistributor`. Field names mirror the Solidity state variables.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct RewardsDistributor {
     /// `minter`: the only caller of `checkpointToken` and `setMinter`, and the source of `activePeriod`.
     pub minter: AccountId,

@@ -65,6 +65,10 @@ pub const ZERO_ACCOUNT: AccountId = [0u8; 32];
 
 /// `IVotingEscrow.LockedBalance`. `end` is zero for a permanent lock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct LockedBalance {
     /// `amount` (`int128`).
     pub amount: i128,
@@ -76,6 +80,10 @@ pub struct LockedBalance {
 
 /// `IVotingEscrow.UserPoint`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct UserPoint {
     /// `bias` (`int128`).
     pub bias: i128,
@@ -91,6 +99,10 @@ pub struct UserPoint {
 
 /// `IVotingEscrow.GlobalPoint`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct GlobalPoint {
     /// `bias` (`int128`).
     pub bias: i128,
@@ -106,6 +118,10 @@ pub struct GlobalPoint {
 
 /// `IVotingEscrow.EscrowType`. `Normal` is the default for every token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub enum EscrowType {
     /// A typical veNFT.
     #[default]
@@ -119,6 +135,10 @@ pub enum EscrowType {
 /// `IVotingEscrow.Checkpoint`: a voting checkpoint of one token. `owner` is the zero account for a burnt
 /// token. `delegatee` is zero when the token is not delegating.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct VoteCheckpoint {
     /// `fromTimestamp`.
     pub from_timestamp: u64,
@@ -132,6 +152,10 @@ pub struct VoteCheckpoint {
 
 /// State of the core `VotingEscrow`. Field names mirror the Solidity state variables.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct VotingEscrow {
     /// `team`: may call `toggleSplit`.
     pub team: AccountId,

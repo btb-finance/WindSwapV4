@@ -98,6 +98,10 @@ fn to_i128(liquidity: u128) -> Result<i128> {
 
 /// One NFT position as the gauge reads it through `positions(tokenId)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct NftPosition {
     pub token0: AccountId,
     pub token1: AccountId,
@@ -119,6 +123,10 @@ pub struct NftPosition {
 ///   requested owed amounts from that same pool position. The real manager pays per-NFT
 ///   `tokensOwed`; this model pays the pool position's owed amounts (see the Solidity mock's note).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct PositionManager {
     /// The manager's account: owner of the pool positions it mints (`ClPool::nft`).
     pub account: AccountId,
@@ -263,6 +271,10 @@ impl PositionManager {
 
 /// Constructor inputs of a gauge (the arguments of `CLGauge.initialize` that the gauge uses).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct GaugeConfig {
     /// The gauge's own account: the pool's registered gauge.
     pub account: AccountId,
@@ -279,6 +291,10 @@ pub struct GaugeConfig {
 
 /// Per-token reward bookkeeping (`rewards`, `rewardGrowthInside`, `lastUpdateTime`, `depositTimestamp`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct TokenRewards {
     pub rewards: U256,
     pub reward_growth_inside: U256,
@@ -291,6 +307,10 @@ pub type FeesToVotingReward = (U256, U256);
 
 /// The gauge state. See the module docs for the convention on transfers and `msg.sender`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct ClGauge {
     pub account: AccountId,
     pub voter: AccountId,
