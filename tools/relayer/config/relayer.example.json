@@ -17,7 +17,9 @@
       "scanBatchSize": 200,
       "requestsPerSecond": 20,
       "blockConcurrency": 8,
-      "maxFeePerGasCapFallback": "100000000000"
+      "maxFeePerGasCapFallback": "100000000000",
+      "autoRegister": false,
+      "denyTokens": []
     }
   ],
   "pollIntervalMs": 15000,

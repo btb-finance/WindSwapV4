@@ -62,6 +62,7 @@
 
 mod accounting;
 mod evm;
+mod permissionless;
 mod tokenomics;
 mod views;
 
@@ -238,45 +239,8 @@ pub struct Contract {
     withdrawals_by_owner: LookupMap<Owner, Vec<u64>>,
     /// Tokens with a nonzero internal balance, per owner.
     balance_tokens_by_owner: LookupMap<Owner, Vec<String>>,
-}
-
-/// State layout of the deployed testnet contract (v6): the `Contract` struct before the solvency
-/// accounting fields. Only used by `migrate`. Field order and types must match the deployed state
-/// exactly.
-#[near(serializers = [borsh])]
-struct ContractV6 {
-    owner: AccountId,
-    fee_config: FeeConfig,
-    pools: IterableMap<u64, ClPool>,
-    pool_tokens: LookupMap<u64, (String, String)>,
-    next_pool_id: u64,
-    legacy_balances: LookupMap<(AccountId, String), u128>,
-    balances: LookupMap<(Owner, String), u128>,
-    allowed_tokens: IterableSet<AccountId>,
-    mpc_contract: AccountId,
-    links: LinkRegistry,
-    action_nonces: LookupSet<(WalletId, u64)>,
-    withdrawals: LookupMap<u64, Withdrawal>,
-    next_withdrawal_id: u64,
-    relayers: IterableSet<AccountId>,
-    evm_assets: IterableMap<String, EvmAsset>,
-    evm_asset_by_token: LookupMap<String, String>,
-    evm_chains: LookupMap<u64, EvmChain>,
-    evm_deposits: LookupSet<(u64, [u8; 32], u32)>,
-    evm_deposits_by_asset: LookupSet<(u64, [u8; 32], u32, String)>,
-    has_state: LookupSet<Owner>,
-    wind_token: Option<AccountId>,
-    ve: LazyOption<VotingEscrow>,
-    voter: LazyOption<Voter>,
-    minter: LazyOption<Minter>,
-    distributor: LazyOption<RewardsDistributor>,
-    gauges: LookupMap<u64, ClGauge>,
-    stakes: LookupMap<StakeKey, U256>,
-    nft_manager: LazyOption<PositionManager>,
-    wind_genesis_done: bool,
-    wind_genesis_pending: bool,
-    wind_minted: u128,
-    pending_epoch: Option<PendingEpoch>,
+    // Appended in v8 (permissionless listing). See `permissionless`.
+    permissionless: permissionless::Permissionless,
 }
 
 #[derive(Clone)]
@@ -341,6 +305,10 @@ pub struct EvmAssetView {
     pub decimals: u8,
     pub per_deposit_cap: U128,
     pub daily_withdraw_cap: U128,
+    /// False for an auto-registered token until the owner verifies it.
+    pub verified: bool,
+    /// Informational symbol reported by the relayer. Empty for owner-registered assets.
+    pub symbol: String,
 }
 
 #[near(serializers = [json])]
@@ -784,7 +752,7 @@ fn signed_raw_tx(tx: &EvmTx, sig: &MpcSignature) -> Result<String, String> {
 }
 
 /// The JSON view of an EVM asset.
-fn evm_asset_view(a: &EvmAsset) -> EvmAssetView {
+fn evm_asset_view(a: &EvmAsset, verified: bool, symbol: String) -> EvmAssetView {
     EvmAssetView {
         chain_id: a.chain_id,
         asset: a.asset.clone(),
@@ -792,6 +760,8 @@ fn evm_asset_view(a: &EvmAsset) -> EvmAssetView {
         decimals: a.decimals,
         per_deposit_cap: U128(a.per_deposit_cap),
         daily_withdraw_cap: U128(a.daily_withdraw_cap),
+        verified,
+        symbol,
     }
 }
 
@@ -1071,6 +1041,7 @@ impl Contract {
     fn write_back(&mut self, pools: BTreeMap<u64, ClPool>) {
         for (id, pool) in pools {
             self.pools.insert(id, pool);
+            self.touch_pool(id);
         }
     }
 
@@ -1096,6 +1067,12 @@ impl Contract {
             let pool = self.pool_mut(pool_id);
             ok(pool.swap(zero_for_one, amount, limit, fee, unstaked_fee, now()))
         };
+        self.sync_pool(
+            pool_id,
+            1,
+            to_u128(result.amount0.unsigned_abs()),
+            to_u128(result.amount1.unsigned_abs()),
+        );
         self.settle(&owner, &token0, result.amount0);
         self.settle(&owner, &token1, result.amount1);
         self.reserve_flow(Flow::Swap, pool_id, &token0, result.amount0);
@@ -1118,6 +1095,7 @@ impl Contract {
         self.credit(&owner, &route.token_out, out);
         self.route_reserves(&flows);
         self.write_back(pools);
+        self.count_swaps(&flows);
         out
     }
 
@@ -1136,6 +1114,7 @@ impl Contract {
         self.credit(&owner, &route.token_out, amount_out);
         self.route_reserves(&flows);
         self.write_back(pools);
+        self.count_swaps(&flows);
         paid
     }
 
@@ -1153,6 +1132,7 @@ impl Contract {
             let pool = self.pool_mut(pool_id);
             ok(pool.mint(owner, tick_lower, tick_upper, liquidity, now()))
         };
+        self.touch_pool(pool_id);
         self.debit(&owner, &token0, to_u128(amount0));
         self.debit(&owner, &token1, to_u128(amount1));
         self.reserve_in(Flow::Mint, pool_id, &token0, to_u128(amount0));
@@ -1176,6 +1156,7 @@ impl Contract {
             let pool = self.pool_mut(pool_id);
             ok(pool.burn(owner, tick_lower, tick_upper, liquidity, now()))
         };
+        self.touch_pool(pool_id);
         self.sync_position_index(owner, pool_id, tick_lower, tick_upper);
         [amount0.to_string(), amount1.to_string()]
     }
@@ -1192,6 +1173,7 @@ impl Contract {
             let pool = self.pool_mut(pool_id);
             ok(pool.collect(owner, tick_lower, tick_upper, u128::MAX, u128::MAX))
         };
+        self.touch_pool(pool_id);
         self.credit(&owner, &token0, amount0);
         self.credit(&owner, &token1, amount1);
         self.reserve_out(Flow::Collect, pool_id, &token0, amount0);
@@ -1480,84 +1462,20 @@ impl Contract {
             stakes_by_owner: LookupMap::new(StorageKey::StakesByOwner),
             withdrawals_by_owner: LookupMap::new(StorageKey::WithdrawalsByOwner),
             balance_tokens_by_owner: LookupMap::new(StorageKey::BalanceTokensByOwner),
+            permissionless: permissionless::Permissionless::new(),
         }
     }
 
-    /// Upgrade from the deployed testnet state (v6: the ve(3,3) layout) to v7 (solvency
-    /// accounting). Run once, as the init call of the redeploy:
-    /// `near contract deploy <acct> use-file <wasm> with-init-call migrate json-args '{}'`.
+    /// Upgrade from the deployed v7 state to v8 (permissionless listing). Run once, as the init call
+    /// of the redeploy: `near contract deploy <acct> use-file <wasm> with-init-call migrate json-args '{}'`.
     ///
-    /// Everything in v6 is kept. The v6 balances and pool reserves cannot be summed here (a
-    /// `LookupMap` cannot be iterated, and pool reserves are not stored), so the owner seeds them
-    /// with `seed_accounting` and `seed_pool_reserves`. Until then `get_token_accounting` reports
-    /// `migrated: true` and totals that are incomplete. The pending EVM withdrawals are summed here.
-    /// The four owner indexes (see `views`) also start empty; fill them with the `backfill_*` calls.
-    /// Only the contract account can call it (`#[private]`).
+    /// Everything in v7 is kept. The new `permissionless` field starts with no default caps, and the
+    /// pool index is backfilled from the existing pools. Only the contract account can call it
+    /// (`#[private]`). See `permissionless::migrate_from_v7`.
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
-        let old: ContractV6 =
-            env::state_read().unwrap_or_else(|| env::panic_str("no contract state to migrate"));
-        let next_withdrawal_id = old.next_withdrawal_id;
-        let mut contract = Self {
-            owner: old.owner,
-            fee_config: old.fee_config,
-            pools: old.pools,
-            pool_tokens: old.pool_tokens,
-            next_pool_id: old.next_pool_id,
-            legacy_balances: old.legacy_balances,
-            balances: old.balances,
-            allowed_tokens: old.allowed_tokens,
-            mpc_contract: old.mpc_contract,
-            links: old.links,
-            action_nonces: old.action_nonces,
-            withdrawals: old.withdrawals,
-            next_withdrawal_id: old.next_withdrawal_id,
-            relayers: old.relayers,
-            evm_assets: old.evm_assets,
-            evm_asset_by_token: old.evm_asset_by_token,
-            evm_chains: old.evm_chains,
-            evm_deposits: old.evm_deposits,
-            evm_deposits_by_asset: old.evm_deposits_by_asset,
-            has_state: old.has_state,
-            wind_token: old.wind_token,
-            ve: old.ve,
-            voter: old.voter,
-            minter: old.minter,
-            distributor: old.distributor,
-            gauges: old.gauges,
-            stakes: old.stakes,
-            nft_manager: old.nft_manager,
-            wind_genesis_done: old.wind_genesis_done,
-            wind_genesis_pending: old.wind_genesis_pending,
-            wind_minted: old.wind_minted,
-            pending_epoch: old.pending_epoch,
-            positions_by_owner: LookupMap::new(StorageKey::PositionsByOwner),
-            stakes_by_owner: LookupMap::new(StorageKey::StakesByOwner),
-            withdrawals_by_owner: LookupMap::new(StorageKey::WithdrawalsByOwner),
-            balance_tokens_by_owner: LookupMap::new(StorageKey::BalanceTokensByOwner),
-            liabilities: LookupMap::new(StorageKey::Liabilities),
-            accounted: LookupSet::new(StorageKey::Accounted),
-            needs_seed: true,
-            pool_reserves: LookupMap::new(StorageKey::PoolReserves),
-            reserve_totals: LookupMap::new(StorageKey::ReserveTotals),
-            reserves_seeded: LookupSet::new(StorageKey::ReservesSeeded),
-            pending_withdrawals: LookupMap::new(StorageKey::PendingOwed),
-            unbacked: LookupMap::new(StorageKey::Unbacked),
-        };
-        // Withdrawals not yet broadcast are still owed. They are few, and the ids are sequential.
-        for id in 0..next_withdrawal_id {
-            let Some(w) = contract.withdrawals.get(&id).cloned() else {
-                continue;
-            };
-            if matches!(
-                w.status,
-                WithdrawalStatus::Pending | WithdrawalStatus::Signed { .. }
-            ) {
-                contract.pending_add(&w.token_id, w.amount);
-            }
-        }
-        contract
+        permissionless::migrate_from_v7()
     }
 
     /// Owner only. Moves the v3 balances of the listed `(account, token)` pairs to their owner
@@ -1673,42 +1591,6 @@ impl Contract {
     ) -> String {
         let sig = sig.unwrap_or_else(|e| env::panic_str(&format!("MPC sign failed: {e:?}")));
         signed_raw_tx(&tx, &sig).unwrap_or_else(|e| env::panic_str(&e))
-    }
-
-    /// Owner only. Creates and initializes a pool for `(token0, token1)`. The tick spacing
-    /// must be enabled in the fee config. Token ids must parse as account ids.
-    pub fn create_pool(
-        &mut self,
-        token0: String,
-        token1: String,
-        tick_spacing: i32,
-        sqrt_price_x96: String,
-    ) -> u64 {
-        self.assert_owner();
-        if token0 == token1 {
-            env::panic_str("token0 and token1 must differ");
-        }
-        self.validate_pool_token(&token0);
-        self.validate_pool_token(&token1);
-        if !self
-            .fee_config
-            .tick_spacing_to_fee
-            .contains_key(&tick_spacing)
-        {
-            env::panic_str(&format!("tick spacing {tick_spacing} is not enabled"));
-        }
-        let sqrt_price = parse_u256(&sqrt_price_x96);
-
-        let mut pool = ClPool::default();
-        ok(pool.initialize(tick_spacing, sqrt_price, now()));
-
-        let pool_id = self.next_pool_id;
-        self.next_pool_id = pool_id
-            .checked_add(1)
-            .unwrap_or_else(|| env::panic_str("pool id overflow"));
-        self.pools.insert(pool_id, pool);
-        self.pool_tokens.insert(pool_id, (token0, token1));
-        pool_id
     }
 
     /// Owner only. Adds `token` (a NEP-141 contract account) to the deposit whitelist.
@@ -1963,6 +1845,11 @@ impl Contract {
     pub fn enable_tick_spacing(&mut self, tick_spacing: i32, fee: u32) {
         self.assert_owner();
         ok(self.fee_config.enable_tick_spacing(tick_spacing, fee));
+        for id in 0..self.next_pool_id {
+            if self.pool_ref(id).tick_spacing == tick_spacing {
+                self.touch_pool(id);
+            }
+        }
     }
 
     /// Owner only. Sets the swap fee of one pool, in hundredths of a bip. `0` clears it. The
@@ -1971,6 +1858,7 @@ impl Contract {
         self.assert_owner();
         self.pool_ref(pool_id);
         ok(self.fee_config.set_custom_swap_fee(pool_id, fee));
+        self.touch_pool(pool_id);
     }
 
     /// Owner only. Sets the unstaked fee of one pool, in hundredths of a bip. `0` clears it.
@@ -2210,12 +2098,15 @@ impl Contract {
         let asset = normalize_asset(&asset).ok()?;
         self.evm_assets
             .get(&evm_asset_key(chain_id, &asset))
-            .map(evm_asset_view)
+            .map(|a| self.evm_asset_view_of(a))
     }
 
     /// All registered EVM assets.
     pub fn get_evm_assets(&self) -> Vec<EvmAssetView> {
-        self.evm_assets.values().map(evm_asset_view).collect()
+        self.evm_assets
+            .values()
+            .map(|a| self.evm_asset_view_of(a))
+            .collect()
     }
 
     /// Owner only. Sets the settings of an EVM chain: `path` (the MPC derivation path, whose
@@ -2275,6 +2166,12 @@ impl Contract {
     /// part of the key. Panics if the asset is not registered, if `amount` is zero, or if it is above
     /// the asset's per-deposit cap. The credit goes to the owner that `from` resolves to: its
     /// linked account, or its own owner id if it is not linked.
+    ///
+    /// An unregistered ERC-20 on an enabled chain is registered by this call when `decimals`
+    /// (0-36) is given, with the default caps and `verified: false`. `symbol` is informational.
+    /// Without `decimals` the report returns `false` and logs why. See `permissionless`.
+    // The arguments are the relayer's report fields, so they stay separate.
+    #[allow(clippy::too_many_arguments)]
     pub fn report_evm_deposit(
         &mut self,
         chain_id: u64,
@@ -2283,20 +2180,19 @@ impl Contract {
         from: String,
         asset: String,
         amount: U128,
+        decimals: Option<u8>,
+        symbol: Option<String>,
     ) -> bool {
         self.assert_relayer();
         let hash = parse_tx_hash(&tx_hash).unwrap_or_else(|e| env::panic_str(&e));
         let from = evm::parse_address(&from).unwrap_or_else(|e| env::panic_str(&e));
         let asset = normalize_asset(&asset).unwrap_or_else(|e| env::panic_str(&e));
-        let info = self
-            .evm_assets
-            .get(&evm_asset_key(chain_id, &asset))
-            .cloned()
-            .unwrap_or_else(|| {
-                env::panic_str(&format!(
-                    "asset {asset} on chain {chain_id} is not registered"
-                ))
-            });
+        // An unknown ERC-20 on an enabled chain is registered here (see `permissionless`).
+        let Some(info) =
+            self.asset_for_report(chain_id, &asset, &hash, log_index, decimals, symbol)
+        else {
+            return false;
+        };
         // A report is a duplicate if its legacy key (no asset) or its asset key was credited.
         // A panic below reverts the insert too.
         if self.evm_deposits.contains(&(chain_id, hash, log_index))
@@ -2587,6 +2483,8 @@ pub mod accounts;
 mod accounts_tests;
 #[cfg(test)]
 mod bridge_tests;
+#[cfg(test)]
+mod permissionless_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

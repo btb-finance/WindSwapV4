@@ -1,5 +1,5 @@
 import { keccak256, stringToHex } from "viem";
-import type { BlockTx, DepositCandidate, EvmReader, Hex, Logger, RawLog, TransferEvent } from "./types.js";
+import type { BlockTx, DepositCandidate, EvmReader, Hex, Logger, RawLog, TokenMeta, TransferEvent } from "./types.js";
 import { mapLimit } from "./util.js";
 
 export const TRANSFER_TOPIC = keccak256(stringToHex("Transfer(address,address,uint256)"));
@@ -80,8 +80,17 @@ export interface ScanResult {
 }
 
 /**
+ * Largest decimals the contract accepts for a registered asset.
+ */
+const MAX_DECIMALS = 36;
+
+/**
  * Scans [range.from, range.to] for deposits to the vault. `registered` is the set of lowercase
- * asset keys ("native" plus ERC-20 addresses) for this chain. Unregistered assets are ignored.
+ * asset keys ("native" plus ERC-20 addresses) for this chain.
+ *
+ * Unregistered ERC-20s are ignored, unless `autoRegister` is given: then each one that is not in
+ * `deny` is reported with its `decimals` and `symbol` read by `readMeta`. A token whose metadata
+ * cannot be read is ignored with a warning, since the contract refuses a report without decimals.
  */
 export async function scanRange(args: {
   reader: EvmReader;
@@ -91,8 +100,10 @@ export async function scanRange(args: {
   registered: ReadonlySet<string>;
   log: Logger;
   blockConcurrency?: number;
+  autoRegister?: { deny: ReadonlySet<string>; readMeta: (token: Hex) => Promise<TokenMeta | null> };
 }): Promise<ScanResult> {
-  const { reader, chainId, vault, range, registered, log } = args;
+  const { reader, chainId, vault, range, registered, log, autoRegister } = args;
+  const metaCache = new Map<string, TokenMeta | null>();
   const concurrency = args.blockConcurrency ?? 1;
   const deposits: DepositCandidate[] = [];
   let revertedNative = 0;
@@ -124,7 +135,35 @@ export async function scanRange(args: {
     const transfer = decodeTransferLog(raw, vault);
     if (!transfer) continue;
     if (!registered.has(transfer.token)) {
-      ignoredTransfers.push(transfer);
+      if (!autoRegister || autoRegister.deny.has(transfer.token)) {
+        ignoredTransfers.push(transfer);
+        continue;
+      }
+      let meta = metaCache.get(transfer.token);
+      if (meta === undefined) {
+        meta = await autoRegister.readMeta(transfer.token);
+        metaCache.set(transfer.token, meta);
+      }
+      if (!meta || !Number.isInteger(meta.decimals) || meta.decimals < 0 || meta.decimals > MAX_DECIMALS) {
+        log.warn("cannot auto-register token: decimals unreadable, deposit ignored", {
+          token: transfer.token,
+          txHash: transfer.txHash,
+        });
+        ignoredTransfers.push(transfer);
+        continue;
+      }
+      deposits.push({
+        chainId,
+        txHash: transfer.txHash,
+        logIndex: transfer.logIndex,
+        from: transfer.from,
+        asset: transfer.token,
+        amount: transfer.value,
+        blockNumber: transfer.blockNumber,
+        transactionIndex: transfer.transactionIndex,
+        decimals: meta.decimals,
+        symbol: meta.symbol,
+      });
       continue;
     }
     deposits.push({

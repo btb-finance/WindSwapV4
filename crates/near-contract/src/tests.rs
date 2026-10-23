@@ -108,8 +108,8 @@ fn create_pool_initializes_state() {
 }
 
 #[test]
-#[should_panic(expected = "only owner")]
-fn create_pool_rejects_non_owner() {
+#[should_panic(expected = "attach at least")]
+fn create_pool_rejects_non_owner_without_the_storage_deposit() {
     let mut c = setup();
     set_ctx(ALICE, 1_000);
     c.create_pool(USDC.into(), WNEAR.into(), TICK_SPACING, Q96_STR.into());
@@ -465,10 +465,10 @@ fn withdraw_works_after_token_is_removed() {
     assert_eq!(balance(&c, ALICE, USDC), 0);
 }
 
-// ---- Upgrade from the deployed layout (ContractV6) ----
+// ---- Upgrade from the deployed layout (ContractV7) ----
 
 #[test]
-fn migrate_reads_deployed_v6_state_and_backfill_restores_the_indexes() {
+fn migrate_reads_deployed_v7_state_and_backfill_restores_the_indexes() {
     const ETH: &str = "base-sepolia:eth";
     set_ctx(OWNER, 1_000);
     let mut c = Contract::new(acct(OWNER));
@@ -503,83 +503,14 @@ fn migrate_reads_deployed_v6_state_and_backfill_restores_the_indexes() {
     let alice_hex = owner_hex(&alice_owner);
     let bob_hex = owner_hex(&bob_owner);
 
-    // Write the deployed (v6) layout: the same fields, without the owner indexes. The indexes
-    // were written above under their prefixes, so drop those entries first, as they never
-    // existed before the upgrade.
+    // Write the deployed (v7) layout, without the owner indexes, as they were before the
+    // backfill. The indexes were written above under their prefixes, so drop those entries first.
     let mut c = c;
     c.positions_by_owner.remove(&alice_owner);
     c.balance_tokens_by_owner.remove(&alice_owner);
     c.balance_tokens_by_owner.remove(&bob_owner);
     c.withdrawals_by_owner.remove(&alice_owner);
-    let Contract {
-        owner,
-        fee_config,
-        pools,
-        pool_tokens,
-        next_pool_id,
-        legacy_balances,
-        balances,
-        allowed_tokens,
-        mpc_contract,
-        links,
-        action_nonces,
-        withdrawals,
-        next_withdrawal_id,
-        relayers,
-        evm_assets,
-        evm_asset_by_token,
-        evm_chains,
-        evm_deposits,
-        evm_deposits_by_asset,
-        has_state,
-        wind_token,
-        ve,
-        voter,
-        minter,
-        distributor,
-        gauges,
-        stakes,
-        nft_manager,
-        wind_genesis_done,
-        wind_genesis_pending,
-        wind_minted,
-        pending_epoch,
-        ..
-    } = c;
-    env::state_write(&ContractV6 {
-        owner,
-        fee_config,
-        pools,
-        pool_tokens,
-        next_pool_id,
-        legacy_balances,
-        balances,
-        allowed_tokens,
-        mpc_contract,
-        links,
-        action_nonces,
-        withdrawals,
-        next_withdrawal_id,
-        relayers,
-        evm_assets,
-        evm_asset_by_token,
-        evm_chains,
-        evm_deposits,
-        evm_deposits_by_asset,
-        has_state,
-        wind_token,
-        ve,
-        voter,
-        minter,
-        distributor,
-        gauges,
-        stakes,
-        nft_manager,
-        wind_genesis_done,
-        wind_genesis_pending,
-        wind_minted,
-        pending_epoch,
-    });
+    env::state_write(&permissionless::into_v7(c));
 
     let mut c = Contract::migrate();
     // Everything in v6 is kept.

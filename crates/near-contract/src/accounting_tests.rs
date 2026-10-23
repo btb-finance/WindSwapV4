@@ -797,25 +797,19 @@ fn owner_hex_of(name: &str) -> String {
     owner_hex(&owner_of_account(&acct(name)))
 }
 
-/// Writes a v6 state holding two balances, one pool, and three EVM withdrawals of which two
-/// are not yet broadcast.
+/// Writes the deployed v7 state: two balances, one pool, and three EVM withdrawals of which two are
+/// not yet broadcast. The pending totals are set as v7 holds them, and the state is migrated, so
+/// nothing is counted until touched or seeded.
 fn write_v6_state() {
     let alice = owner_of_account(&acct(ALICE));
     let bob = owner_of_account(&acct(BOB));
-    let mut balances = LookupMap::new(StorageKey::OwnerBalances);
-    balances.insert((bob, USDC.to_string()), 7);
-    balances.insert((alice, WIND.to_string()), 100 * E18);
-    let mut allowed_tokens = IterableSet::new(StorageKey::AllowedTokens);
-    allowed_tokens.insert(acct(USDC));
-    allowed_tokens.insert(acct(WIND));
-    let mut pools = IterableMap::new(StorageKey::Pools);
-    let mut pool = ClPool::default();
-    pool.initialize(SPACING, parse_u256(Q96), T0 as u32)
-        .expect("initialize");
-    pools.insert(0, pool);
-    let mut pool_tokens = LookupMap::new(StorageKey::PoolTokens);
-    pool_tokens.insert(0, (USDC.to_string(), WNEAR.to_string()));
-    let mut withdrawals = LookupMap::new(StorageKey::Withdrawals);
+    ctx(OWNER, T0, 0);
+    let mut c = Contract::new(acct(OWNER));
+    c.balances.insert((bob, USDC.to_string()), 7);
+    c.balances.insert((alice, WIND.to_string()), 100 * E18);
+    c.allowed_tokens.insert(acct(USDC));
+    c.allowed_tokens.insert(acct(WIND));
+    c.create_pool(USDC.into(), WNEAR.into(), SPACING, Q96.into());
     let w = |status| Withdrawal {
         owner: alice,
         token_id: "base-sepolia:eth".to_string(),
@@ -825,14 +819,14 @@ fn write_v6_state() {
         status,
         signing_nonce: None,
     };
-    withdrawals.insert(
+    c.withdrawals.insert(
         0,
         Withdrawal {
             amount: 5,
             ..w(WithdrawalStatus::Pending)
         },
     );
-    withdrawals.insert(
+    c.withdrawals.insert(
         1,
         Withdrawal {
             amount: 9,
@@ -842,7 +836,7 @@ fn write_v6_state() {
             })
         },
     );
-    withdrawals.insert(
+    c.withdrawals.insert(
         2,
         Withdrawal {
             amount: 4,
@@ -852,45 +846,13 @@ fn write_v6_state() {
             })
         },
     );
-    let (ve, voter, minter, distributor) = tokenomics::fresh_state(&acct(OWNER), T0, T0);
-    let old = ContractV6 {
-        owner: acct(OWNER),
-        fee_config: FeeConfig::default(),
-        pools,
-        pool_tokens,
-        next_pool_id: 1,
-        legacy_balances: LookupMap::new(StorageKey::Balances),
-        balances,
-        allowed_tokens,
-        mpc_contract: acct("mpc.example.testnet"),
-        links: LinkRegistry::new("links"),
-        action_nonces: LookupSet::new(StorageKey::ActionNonces),
-        withdrawals,
-        next_withdrawal_id: 3,
-        relayers: IterableSet::new(StorageKey::Relayers),
-        evm_assets: IterableMap::new(StorageKey::EvmAssets),
-        evm_asset_by_token: LookupMap::new(StorageKey::EvmAssetByToken),
-        evm_chains: LookupMap::new(StorageKey::EvmChains),
-        evm_deposits: LookupSet::new(StorageKey::EvmDeposits),
-        evm_deposits_by_asset: LookupSet::new(StorageKey::EvmDepositsByAsset),
-        has_state: LookupSet::new(StorageKey::HasState),
-        wind_token: Some(acct(WIND)),
-        ve: LazyOption::new(StorageKey::Ve, Some(ve)),
-        voter: LazyOption::new(StorageKey::Voter, Some(voter)),
-        minter: LazyOption::new(StorageKey::Minter, Some(minter)),
-        distributor: LazyOption::new(StorageKey::Distributor, Some(distributor)),
-        gauges: LookupMap::new(StorageKey::Gauges),
-        stakes: LookupMap::new(StorageKey::Stakes),
-        nft_manager: LazyOption::new(
-            StorageKey::NftManager,
-            Some(PositionManager::new(tokenomics::nft_manager_account())),
-        ),
-        wind_genesis_done: true,
-        wind_genesis_pending: false,
-        wind_minted: 100 * E18,
-        pending_epoch: None,
-    };
-    env::state_write(&old);
+    c.next_withdrawal_id = 3;
+    c.pending_add("base-sepolia:eth", 5 + 4);
+    c.wind_token = Some(acct(WIND));
+    c.wind_genesis_done = true;
+    c.wind_minted = 100 * E18;
+    c.needs_seed = true;
+    env::state_write(&permissionless::into_v7(c));
 }
 
 #[test]

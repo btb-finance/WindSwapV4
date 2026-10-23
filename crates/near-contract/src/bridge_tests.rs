@@ -121,6 +121,8 @@ fn deposit(c: &mut Contract, from: &str, tx: u8, log: u32, asset: &str, amount: 
         from.into(),
         asset.into(),
         U128(amount),
+        None,
+        None,
     )
 }
 
@@ -321,6 +323,8 @@ fn report_deposit_requires_a_relayer() {
         address_of(&sk(1)),
         "native".into(),
         U128(1),
+        None,
+        None,
     );
 }
 
@@ -442,10 +446,10 @@ fn legacy_key_without_asset_still_blocks_replays_of_either_asset() {
 }
 
 #[test]
-#[should_panic(expected = "is not registered")]
-fn deposit_rejects_an_unregistered_asset() {
+fn deposit_of_an_unregistered_erc20_without_decimals_is_refused() {
     let mut c = ready(E18);
-    deposit(&mut c, &address_of(&sk(6)), 1, 0, USDC_ADDR, 1);
+    assert!(!deposit(&mut c, &address_of(&sk(6)), 1, 0, USDC_ADDR, 1));
+    assert!(c.get_evm_asset(CHAIN, USDC_ADDR.into()).is_none());
 }
 
 #[test]
@@ -477,6 +481,8 @@ fn deposit_rejects_a_short_tx_hash() {
         address_of(&sk(6)),
         "native".into(),
         U128(1),
+        None,
+        None,
     );
 }
 

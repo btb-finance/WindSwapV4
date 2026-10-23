@@ -2,7 +2,7 @@ import type { EvmChainConfig, RelayerConfig } from "./config.js";
 import { isContractRejection } from "./near.js";
 import { planScanRange, scanRange } from "./deposits.js";
 import { freshState, loadState, saveState, type ChainState } from "./state.js";
-import type { AssetInfo, DepositCandidate, EvmReader, Logger, NearReader, NearWriter } from "./types.js";
+import type { AssetInfo, DepositCandidate, EvmReader, Hex, Logger, NearReader, NearWriter } from "./types.js";
 
 export interface WatcherDeps {
   config: RelayerConfig;
@@ -32,6 +32,20 @@ export interface DepositPassStats {
   caughtUp: boolean;
 }
 
+/**
+ * Whether `chainId` is enabled on the contract (`set_evm_chain`). Auto-registration needs it. A
+ * failing view counts as disabled in dry-run and throws in live mode, like get_evm_assets.
+ */
+export async function loadChainEnabled(deps: WatcherDeps, chainId: number, dryRun: boolean): Promise<boolean> {
+  try {
+    return (await deps.near.getEvmChain(chainId)) !== null;
+  } catch (err) {
+    if (!dryRun) throw err;
+    deps.log.warn("get_evm_chain unavailable, auto-registration off in dry-run", { error: String(err) });
+    return false;
+  }
+}
+
 /** Asset keys registered for `chainId`. Dry-run falls back to config when the view is unavailable. */
 export async function loadRegisteredAssets(deps: WatcherDeps, chainId: number, dryRun: boolean): Promise<Set<string>> {
   let assets: AssetInfo[];
@@ -55,6 +69,13 @@ export async function runDepositPass(
 ): Promise<DepositPassStats> {
   const { log } = deps;
   const registered = await loadRegisteredAssets(deps, chain.chainId, opts.dryRun);
+  const autoRegister =
+    chain.autoRegister === true && (await loadChainEnabled(deps, chain.chainId, opts.dryRun))
+      ? {
+          deny: new Set(chain.denyTokens ?? []),
+          readMeta: (token: Hex) => reader.tokenMeta(token),
+        }
+      : undefined;
   const stats: DepositPassStats = {
     chain: chain.name,
     found: [],
@@ -106,6 +127,7 @@ export async function runDepositPass(
       registered,
       log,
       blockConcurrency: chain.blockConcurrency,
+      autoRegister,
     });
     stats.ignoredTransfers += result.ignoredTransfers.length;
     stats.revertedNative += result.revertedNative;
@@ -151,6 +173,7 @@ async function reportOne(deps: WatcherDeps, dep: DepositCandidate, dryRun: boole
     from: dep.from,
     asset: dep.asset,
     amount: dep.amount.toString(),
+    ...(dep.decimals !== undefined ? { decimals: dep.decimals, symbol: dep.symbol ?? "" } : {}),
   };
   if (dryRun || !deps.writer) {
     deps.log.info("[dry-run] would report_evm_deposit", { ...args });
