@@ -93,6 +93,14 @@ pub enum MathError {
     SafeCastOverflow,
     /// `SafeCastLibrary.toUint256`: negative `int128` value (`SafeCastUnderflow`).
     SafeCastUnderflow,
+    /// `Reward`: caller is not the authorized voter, or not approved or owner of the veNFT (`NotAuthorized`).
+    NotAuthorized,
+    /// `FeesVotingReward.notifyRewardAmount`: sender is not the gauge mapped to this contract (`NotGauge`).
+    NotGauge,
+    /// `FeesVotingReward.notifyRewardAmount`: token is not a reward of this contract (`InvalidReward`).
+    InvalidReward,
+    /// `BribeVotingReward.notifyRewardAmount`: a new reward token is not whitelisted (`NotWhitelisted`).
+    NotWhitelisted,
 }
 
 impl fmt::Display for MathError {
