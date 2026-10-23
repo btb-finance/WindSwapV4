@@ -1,0 +1,21 @@
+[package]
+name = "windswap-near"
+description = "Wind Swap v4 NEAR contract (v0 testnet demo) wrapping the windswap-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+# near-sdk 5.27 needs rustc 1.86, newer than the workspace's 1.85 floor.
+rust-version = "1.86"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+near-sdk = { workspace = true }
+windswap-engine = { path = "../engine", features = ["borsh"] }
+
+[dev-dependencies]
+# Host builds of near-sdk need `unit-testing`; it is only enabled for `cargo test`.
+near-sdk = { workspace = true, features = ["unit-testing"] }

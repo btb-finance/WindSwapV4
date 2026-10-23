@@ -18,6 +18,10 @@ use crate::math::truncate_u160;
 
 /// `Oracle.Observation`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct Observation {
     /// `uint32 blockTimestamp`.
     pub block_timestamp: u32,

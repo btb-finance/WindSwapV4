@@ -7,5 +7,12 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+# Optional Borsh serialization of the state types (used by the NEAR contract).
+borsh = ["dep:borsh", "dep:ruint"]
+
 [dependencies]
 alloy-primitives = { workspace = true }
+# `ruint` is the crate behind `alloy_primitives::U256`. Version must match the one in Cargo.lock.
+borsh = { version = "1.5", default-features = false, features = ["derive"], optional = true }
+ruint = { version = "1.17", default-features = false, features = ["borsh"], optional = true }

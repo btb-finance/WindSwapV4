@@ -28,6 +28,10 @@ pub type AccountId = [u8; 32];
 
 /// `CLPool.Slot0` without the `unlocked` flag (see [`ClPool::initialized`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct Slot0 {
     pub sqrt_price_x96: U256,
     pub tick: i32,
@@ -45,6 +49,10 @@ pub struct SwapResult {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct ClPool {
     /// Set by `initialize`; replaces `slot0.unlocked` as the "pool is usable" flag.
     pub initialized: bool,

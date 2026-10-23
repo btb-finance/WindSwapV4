@@ -12,6 +12,10 @@ use crate::math::{full_math, liquidity_math, Q128};
 
 /// Info stored for each position (`Position.Info`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct PositionInfo {
     /// The amount of liquidity owned by this position.
     pub liquidity: u128,
@@ -29,6 +33,10 @@ pub struct PositionInfo {
 /// here it is a plain struct. `owner` is a 32-byte account id (the 20-byte EVM address is
 /// left-padded with zeros).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct PositionKey {
     pub owner: [u8; 32],
     pub tick_lower: i32,

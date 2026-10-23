@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/engine"]
+members = ["crates/engine", "crates/near-contract"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,8 @@ repository = "https://github.com/btb-finance/WindSwapV4"
 
 [workspace.dependencies]
 alloy-primitives = { version = "0.8", default-features = false }
+# Pinned: 5.28+ requires rustc 1.93 (the toolchain here is 1.89). 5.27.0 needs 1.86.
+near-sdk = "=5.27.0"
 
 [profile.release]
 codegen-units = 1

@@ -48,6 +48,10 @@ const DEFAULT_TICK_SPACINGS: [(i32, u32); 5] = [
 
 /// Fee configuration owned by the engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct FeeConfig {
     /// `CLFactory.tickSpacingToFee`. A missing key is the Solidity `0` (not enabled).
     pub tick_spacing_to_fee: BTreeMap<i32, u32>,

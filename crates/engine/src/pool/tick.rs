@@ -22,6 +22,10 @@ use crate::math::truncate_u160;
 
 /// Mirrors `Tick.Info`, fields in declaration order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct TickInfo {
     /// `uint128 liquidityGross`
     pub liquidity_gross: u128,
