@@ -55,6 +55,44 @@ pub enum MathError {
     AlreadyNudged,
     /// `Minter.setTeamRate`: rate above `MAXIMUM_TEAM_RATE` (`RateTooHigh`).
     RateTooHigh,
+    /// `VotingEscrow`: caller is not the token owner (`NotApprovedOrOwner`; no approvals are modelled).
+    NotApprovedOrOwner,
+    /// `VotingEscrow.transferFrom`: `from` is not the current owner (`NotOwner`).
+    NotOwner,
+    /// `VotingEscrow`: the lock has expired (`LockExpired`).
+    LockExpired,
+    /// `VotingEscrow.withdraw`: the lock has not expired yet (`LockNotExpired`).
+    LockNotExpired,
+    /// `VotingEscrow`: the unlock time is not after `now` / the current lock end (`LockDurationNotInFuture`).
+    LockDurationNotInFuture,
+    /// `VotingEscrow`: the unlock time is more than `MAXTIME` after `now` (`LockDurationTooLong`).
+    LockDurationTooLong,
+    /// `VotingEscrow`: the token has no locked amount (`NoLockFound`).
+    NoLockFound,
+    /// `VotingEscrow`: the operation does not apply to a permanent lock (`PermanentLock`).
+    PermanentLock,
+    /// `VotingEscrow.unlockPermanent`: the token is not permanently locked (`NotPermanentLock`).
+    NotPermanentLock,
+    /// `VotingEscrow.merge`: `from == to` (`SameNFT`).
+    SameNft,
+    /// `VotingEscrow.split`: the token has no owner (`SplitNoOwner`).
+    SplitNoOwner,
+    /// `VotingEscrow.split`: neither the owner nor address zero is in `canSplit` (`SplitNotAllowed`).
+    SplitNotAllowed,
+    /// `VotingEscrow.split`: the split amount is not below the lock amount (`AmountTooBig`).
+    AmountTooBig,
+    /// `VotingEscrow`: the token is flagged as voted (`AlreadyVoted`).
+    AlreadyVoted,
+    /// `VotingEscrow.unlockPermanent`: the token was transferred in this block (`OwnershipChange`).
+    OwnershipChange,
+    /// `VotingEscrow.toggleSplit`: caller is not `team` (`NotTeam`).
+    NotTeam,
+    /// `VotingEscrow.voting`: caller is not `voter` (`NotVoter`).
+    NotVoter,
+    /// `SafeCastLibrary.toInt128`: value above the `int128` maximum (`SafeCastOverflow`).
+    SafeCastOverflow,
+    /// `SafeCastLibrary.toUint256`: negative `int128` value (`SafeCastUnderflow`).
+    SafeCastUnderflow,
 }
 
 impl fmt::Display for MathError {
