@@ -797,9 +797,9 @@ fn owner_hex_of(name: &str) -> String {
     owner_hex(&owner_of_account(&acct(name)))
 }
 
-/// Writes a v6 state holding two balances, one pool, and three EVM withdrawals of which two
-/// are not yet broadcast.
-fn write_v6_state() {
+/// Writes a v7 state (as deployed) holding two balances, one pool, and three EVM withdrawals of
+/// which two are not yet broadcast. It is the state after a v6 migration, so the seeding flag is set.
+fn write_v7_state() {
     let alice = owner_of_account(&acct(ALICE));
     let bob = owner_of_account(&acct(BOB));
     let mut balances = LookupMap::new(StorageKey::OwnerBalances);
@@ -852,8 +852,11 @@ fn write_v6_state() {
             })
         },
     );
+    let mut pending_withdrawals = LookupMap::new(StorageKey::PendingOwed);
+    // The two unbroadcast withdrawals (5 pending, 4 signed) are owed.
+    pending_withdrawals.insert("base-sepolia:eth".to_string(), 9);
     let (ve, voter, minter, distributor) = tokenomics::fresh_state(&acct(OWNER), T0, T0);
-    let old = ContractV6 {
+    let old = ContractV7 {
         owner: acct(OWNER),
         fee_config: FeeConfig::default(),
         pools,
@@ -889,13 +892,25 @@ fn write_v6_state() {
         wind_genesis_pending: false,
         wind_minted: 100 * E18,
         pending_epoch: None,
+        liabilities: LookupMap::new(StorageKey::Liabilities),
+        accounted: LookupSet::new(StorageKey::Accounted),
+        needs_seed: true,
+        pool_reserves: LookupMap::new(StorageKey::PoolReserves),
+        reserve_totals: LookupMap::new(StorageKey::ReserveTotals),
+        reserves_seeded: LookupSet::new(StorageKey::ReservesSeeded),
+        pending_withdrawals,
+        unbacked: LookupMap::new(StorageKey::Unbacked),
+        positions_by_owner: LookupMap::new(StorageKey::PositionsByOwner),
+        stakes_by_owner: LookupMap::new(StorageKey::StakesByOwner),
+        withdrawals_by_owner: LookupMap::new(StorageKey::WithdrawalsByOwner),
+        balance_tokens_by_owner: LookupMap::new(StorageKey::BalanceTokensByOwner),
     };
     env::state_write(&old);
 }
 
 #[test]
 fn migration_seeds_totals_once_and_counts_touched_keys_correctly() {
-    write_v6_state();
+    write_v7_state();
     ctx(SELF, T0, 0);
     let mut c = Contract::migrate();
 
@@ -969,7 +984,7 @@ fn migration_seeds_totals_once_and_counts_touched_keys_correctly() {
 #[test]
 #[should_panic(expected = "only owner")]
 fn seeding_is_owner_only() {
-    write_v6_state();
+    write_v7_state();
     ctx(SELF, T0, 0);
     let mut c = Contract::migrate();
     ctx(ALICE, T0, 0);
@@ -987,7 +1002,7 @@ fn a_fresh_contract_has_nothing_to_seed() {
 #[test]
 #[should_panic(expected = "not a token of pool")]
 fn a_reserve_seed_must_name_a_token_of_the_pool() {
-    write_v6_state();
+    write_v7_state();
     ctx(SELF, T0, 0);
     let mut c = Contract::migrate();
     ctx(OWNER, T0, 0);

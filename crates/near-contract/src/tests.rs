@@ -292,13 +292,23 @@ fn ft_on_transfer_credits_whitelisted_token() {
 }
 
 #[test]
-fn ft_on_transfer_ignores_msg_for_now() {
+fn ft_on_transfer_ignores_unknown_msg() {
+    let mut c = setup();
+    fund(&mut c, ALICE, USDC, 0);
+    set_ctx(USDC, 1_000);
+    let unused = c.ft_on_transfer(acct(ALICE), U128(9), "{\"hello\":true}".into());
+    assert!(matches!(unused, PromiseOrValue::Value(U128(0))));
+    assert_eq!(balance(&c, ALICE, USDC), 9);
+}
+
+#[test]
+fn ft_on_transfer_refunds_a_malformed_swap_msg() {
     let mut c = setup();
     fund(&mut c, ALICE, USDC, 0);
     set_ctx(USDC, 1_000);
     let unused = c.ft_on_transfer(acct(ALICE), U128(9), "{\"swap\":true}".into());
-    assert!(matches!(unused, PromiseOrValue::Value(U128(0))));
-    assert_eq!(balance(&c, ALICE, USDC), 9);
+    assert!(matches!(unused, PromiseOrValue::Value(U128(9))));
+    assert_eq!(balance(&c, ALICE, USDC), 0);
 }
 
 #[test]
@@ -465,10 +475,10 @@ fn withdraw_works_after_token_is_removed() {
     assert_eq!(balance(&c, ALICE, USDC), 0);
 }
 
-// ---- Upgrade from the deployed layout (ContractV6) ----
+// ---- Upgrade from the deployed layout (ContractV7) ----
 
 #[test]
-fn migrate_reads_deployed_v6_state_and_backfill_restores_the_indexes() {
+fn migrate_reads_deployed_v7_state_and_keeps_it() {
     const ETH: &str = "base-sepolia:eth";
     set_ctx(OWNER, 1_000);
     let mut c = Contract::new(acct(OWNER));
@@ -499,18 +509,13 @@ fn migrate_reads_deployed_v6_state_and_backfill_restores_the_indexes() {
         "0x2222222222222222222222222222222222222222".into(),
     );
     let alice_owner = owner_of_account(&acct(ALICE));
-    let bob_owner = owner_of_account(&acct(BOB));
     let alice_hex = owner_hex(&alice_owner);
-    let bob_hex = owner_hex(&bob_owner);
+    let bob_hex = owner_hex(&owner_of_account(&acct(BOB)));
 
-    // Write the deployed (v6) layout: the same fields, without the owner indexes. The indexes
-    // were written above under their prefixes, so drop those entries first, as they never
-    // existed before the upgrade.
+    // Write the deployed (v7) layout: every field of `Contract` except the v8 intent collections.
+    // The state is as after a v6 migration, so the seeding flag is set.
     let mut c = c;
-    c.positions_by_owner.remove(&alice_owner);
-    c.balance_tokens_by_owner.remove(&alice_owner);
-    c.balance_tokens_by_owner.remove(&bob_owner);
-    c.withdrawals_by_owner.remove(&alice_owner);
+    c.needs_seed = true;
     let Contract {
         owner,
         fee_config,
@@ -544,9 +549,21 @@ fn migrate_reads_deployed_v6_state_and_backfill_restores_the_indexes() {
         wind_genesis_pending,
         wind_minted,
         pending_epoch,
+        liabilities,
+        accounted,
+        needs_seed,
+        pool_reserves,
+        reserve_totals,
+        reserves_seeded,
+        pending_withdrawals,
+        unbacked,
+        positions_by_owner,
+        stakes_by_owner,
+        withdrawals_by_owner,
+        balance_tokens_by_owner,
         ..
     } = c;
-    env::state_write(&ContractV6 {
+    env::state_write(&ContractV7 {
         owner,
         fee_config,
         pools,
@@ -579,10 +596,22 @@ fn migrate_reads_deployed_v6_state_and_backfill_restores_the_indexes() {
         wind_genesis_pending,
         wind_minted,
         pending_epoch,
+        liabilities,
+        accounted,
+        needs_seed,
+        pool_reserves,
+        reserve_totals,
+        reserves_seeded,
+        pending_withdrawals,
+        unbacked,
+        positions_by_owner,
+        stakes_by_owner,
+        withdrawals_by_owner,
+        balance_tokens_by_owner,
     });
 
-    let mut c = Contract::migrate();
-    // Everything in v6 is kept.
+    let c = Contract::migrate();
+    // Everything in v7 is kept, the owner indexes included.
     assert_eq!(c.get_pool(0).token0, USDC);
     assert_eq!(
         c.get_position(0, acct(ALICE), -300, 300).liquidity.0,
@@ -591,38 +620,20 @@ fn migrate_reads_deployed_v6_state_and_backfill_restores_the_indexes() {
     assert_eq!(balance(&c, BOB, USDC), 7);
     assert_eq!(c.get_withdrawal(1).expect("kept").amount.0, 9);
     assert_eq!(c.get_pending_withdrawals(0, 10).len(), 2);
-
-    // The owner indexes start empty, so the owner views see nothing yet.
-    assert!(c
-        .get_positions_of_owner(alice_hex.clone(), 0, 10)
-        .is_empty());
-    assert!(c.get_balances_of_owner(bob_hex.clone()).is_empty());
-    assert!(c
-        .get_withdrawals_of_owner(alice_hex.clone(), 0, 10)
-        .is_empty());
-
-    // The backfill calls fill them in, and are owner only.
-    set_ctx(OWNER, 1_000);
-    assert_eq!(
-        c.backfill_position_index(vec![(alice_hex.clone(), 0, -300, 300)]),
-        1
-    );
-    assert_eq!(
-        c.backfill_token_index(vec![
-            (bob_hex.clone(), USDC.into()),
-            (bob_hex.clone(), WNEAR.into()),
-        ]),
-        1,
-        "only nonzero balances are indexed"
-    );
-    assert_eq!(c.backfill_withdrawal_index(vec![0, 1, 2]), 2);
     assert_eq!(c.get_positions_of_owner(alice_hex.clone(), 0, 10).len(), 1);
     assert_eq!(c.get_balances_of_owner(bob_hex).len(), 1);
-    let withdrawals = c.get_withdrawals_of_owner(alice_hex, 0, 10);
     assert_eq!(
-        withdrawals.iter().map(|w| w.id).collect::<Vec<_>>(),
-        vec![0, 1]
+        c.get_withdrawals_of_owner(alice_hex.clone(), 0, 10).len(),
+        2
     );
+    assert!(
+        c.get_token_accounting(USDC.into()).migrated,
+        "seeding flag kept"
+    );
+
+    // The intent collections are new and start empty.
+    assert!(c.get_intents_of_owner(alice_hex, 0, 10).is_empty());
+    assert!(c.get_intent(0).is_none());
 }
 
 #[test]
