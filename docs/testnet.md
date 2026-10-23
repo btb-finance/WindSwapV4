@@ -216,3 +216,29 @@ The EVM wallet still holds 91000 test1 on Base and about 0.006993 ETH.
 
 Signed messages use the format above with `{"MintPosition":{…}}` / `{"SwapExactInput":{…}}`. Liquidity was sized from the sqrt-price math
 so that the ETH side was 0.0025 ETH (cap 0.0028) and the test1 side 7.73 (cap 8900).
+
+## v6: ve(3,3) live on NEAR (2026-10-23)
+
+Redeployed with `migrate` (v5 → adds VotingEscrow, Voter, Minter, RewardsDistributor, gauges; deposit dedupe keyed by asset).
+Wasm 1.24 MB, SHA-256 `9dfc700c357492b135d3f688e458034fa20a502dbb8ff0c7735952d1b459bd02` (8 testnet NEAR moved from the
+user/relayer accounts to cover storage). All earlier state (balances, pools 0–4, LP positions) survived the migration.
+
+| Step | Result |
+|---|---|
+| `set_wind_token(windswapv4-wind.testnet)` | ok |
+| `genesis_mint` 1,000,000 WIND — **real cross-contract mint** on the WIND token | token `ft_total_supply` = 1,000,000; DEX holds it; team credited internally; `wind_minted` matches |
+| `create_gauge` pool 4 (ETH/test1), pool 1 (tUSDC/tWETH) | gauge ids 1, 2 |
+| `create_lock` 100,000 WIND, 4 years | veNFT #1, voting power ≈ 99,631 |
+| `vote` veNFT #1: 70% pool 4, 30% pool 1 | weights 69,742 / 29,889 |
+| vote again in the same epoch | rejected `AlreadyVotedOrDeposited` |
+| `whitelist_bribe_token` tUSDC; user `bribe` 5 tUSDC on pool 1 | ok |
+| EVM-only wallet `0x0d53…a4ac` signs **StakePosition** (pool 4, 76000–84000), relayed | pool 4 `staked_liquidity` = full liquidity 767178844087728835 |
+
+Epoch: `active_period` 1792627200; first flip at **1793232000 (Thu 2026-10-29 00:00 UTC)** — then anyone calls
+`distribute` (≥ 230 TGas) to mint the week's WIND (10M) and send emissions to gauges by vote weight; voters can then
+`claim_bribes` / `claim_fees`, veNFT holders `claim_rebase`, and the staked LP `claim_gauge_rewards`.
+
+Known gaps before mainnet (from the ve(3,3) wiring review):
+1. Fee leak between stakers that share one tick range (the engine's NFT-manager model pays a shared position's owed fees) — needs per-NFT owed accounting.
+2. Each engine object is one Borsh blob (pools, ve, voter): gas grows with state — move to per-key storage.
+3. No WIND conservation invariant check yet.
