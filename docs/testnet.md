@@ -242,3 +242,20 @@ Known gaps before mainnet (from the ve(3,3) wiring review):
 1. ~~Fee leak between stakers that share one tick range~~ — fixed in v7: the NFT manager keeps per-NFT owed amounts (`PositionManager`), and a collect pays only the NFT's share. The v6 NFT manager is converted once by `migrate_nft_positions`.
 2. Each engine object is one Borsh blob (pools, ve, voter): gas grows with state — move to per-key storage.
 3. No WIND conservation invariant check yet.
+
+## v7: fee-leak fix, solvency accounting, owner views, partial-fill fix (2026-10-23)
+
+One combined upgrade (`migrate`) + `migrate_nft_positions` (converted 1 staked NFT to per-NFT fee accounting).
+Wasm 1.35 MB, SHA-256 `0440420b8ab8da78a937e5add4d4f84bc9bbabfb1766511807708d8bbbe4d9cd`. All v6 state kept
+(gauges, votes, veNFT #1, epoch, balances, pools 0–4, the EVM wallet's staked position).
+
+| Change | Live check |
+|---|---|
+| Per-NFT fee accounting for gauge-staked / shared-range LPs | `migrate_nft_positions` → 1 |
+| Exact-input routes revert (`InsufficientLiquidity`) instead of charging unconsumed input | regression tests |
+| Owner views + indexes (`get_positions_of_owner`, `get_balances_of_owner`, `get_stakes_of_owner`, `get_withdrawals_of_owner`, `get_gauges`, `get_bribe_tokens`) | backfilled 6 positions, 1 stake, 10 token keys, withdrawals 0–2; the EVM wallet's staked pool-4 position and balances are returned |
+| Signed `Distribute`, `CreateLock.permanent` | relayer schema updated (129 tests) |
+| Solvency accounting (`get_all_tokens_accounting`, `check_solvency`) | `seed_accounting` 11 keys. **WIND: 900,000 balances + 100,000 locked = 1,000,000 owed; `check_solvency` on-chain: held 1,000,000, solvent** |
+
+Pending: `seed_pool_reserves` (pool-held amounts must be computed off-chain from pool state), so per-token
+`pool_reserves` read 0 and `migrated: true` until seeded.
