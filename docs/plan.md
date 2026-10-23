@@ -45,7 +45,7 @@ Users (any chain)
    ▼                                        │
 ┌──────────── One wallet per chain family ──┴─────────────┐
 │ EVM: one EOA (same address on Base, ETH, BSC, Sei…)     │
-│ Solana: one keypair (also WIND mint authority)          │
+│ Solana: one keypair                                     │
 └───────────────┬─────────────────────────▲───────────────┘
                 │ websocket watchers       │ sign + send
                 ▼                          │
@@ -169,61 +169,70 @@ Actions that **move funds in** go through a vault deposit (with a memo). Everyth
 | Transfer LP position / veNFT to another user | Signed message (state-only) |
 | Governance proposals & votes | Signed message (state-only) |
 
-Each user has an **internal account** in engine state, keyed by their wallet address on whichever chain they use. They can link several addresses (e.g. an EVM and a Solana address) to one account by signing a link message from each.
+Each user has an **internal account** in engine state, keyed by their wallet address on whichever chain they use. They can link several addresses (e.g. an EVM and a Solana address) to one account by signing a link message from each (see "Accounts: one account, every chain").
 
 Rewards can stay in the internal balance and be re-locked, re-staked or swapped without ever touching a chain. A user only pays chain gas when they actually withdraw.
 
 ---
 
-## The WIND Token: SPL Token on Solana
+## The WIND Token: NEP-141 on NEAR
 
-WIND is an **SPL token on Solana**. Creating it is a single `create mint` instruction on the standard SPL Token program, so **no custom program is deployed**.
+**Decision (2026-10-23): WIND is a NEP-141 fungible token on NEAR.** There is no Solana SPL token. NEAR is where the engine contract lives, so the token sits next to the logic that mints, locks and distributes it.
 
 | Setting | Value |
 |---|---|
-| Program | SPL Token (or Token-2022), standard Solana program |
-| Mint authority | **TSS Ed25519 group key** (FROST): only a 2/3 quorum of nodes can mint |
-| Freeze authority | None, so nobody can freeze holders |
-| Metadata | Metaplex token metadata (name, symbol, logo) |
-| Decimals | 9 (Solana standard) or 18 → engine scales to 18 internally to keep Solidity math identical |
+| Standard | NEP-141 (+ NEP-145 storage, NEP-148 metadata), built with `near-contract-standards` (same as `crates/test-token`) |
+| Account | e.g. `wind.<project>.near` (testnet: `wind.<project>.testnet`) |
+| Minter | **Only the Wind Swap v4 contract** can mint (owner/minter = the DEX contract account). No human key can mint. |
+| Freeze / blacklist | None |
+| Decimals | 18 (same as the existing EVM WIND, so the ported Solidity math needs no scaling) |
+| Supply rule | Minted only by `Minter.update_period` each epoch (+ the one-time migration of existing WIND) |
 
-### On-chain vs off-chain
-
+### On-chain layout (all on NEAR)
 ```
-           Solana (on-chain)                       Engine (off-chain)
-  ┌─────────────────────────────┐       ┌───────────────────────────────────────┐
-  │ WIND SPL mint (TSS authority)│       │ WIND balances (internal accounts)     │
-  │ Vault WIND account           │◀────▶│ veNFT locks · decay · delegation       │
-  │ User wallets                 │       │ Voter · gauges · rewards · rebase     │
-  └─────────────────────────────┘       │ Minter (emission schedule)             │
-                                         └───────────────────────────────────────┘
+┌────────────────────── NEAR ──────────────────────────────────────────┐
+│  wind.<project>.near (NEP-141)        Wind Swap v4 contract           │
+│   balances of all holders   ◀──────▶  internal balances (deposited)   │
+│   minter = Wind Swap v4               veNFT locks · voting · gauges   │
+│                                       Minter → mints weekly emissions │
+└──────────────────────────────────────────────────────────────────────┘
 ```
-
-**Everything about locking happens off-chain.** Solana only holds the token itself.
 
 ### Flows
-
 | Action | What happens |
 |---|---|
-| **Lock WIND** | User sends SPL WIND to the Solana vault with memo `LOCK:<duration>` → engine creates a veNFT in state. Tokens stay in the vault. |
-| **Lock from any chain** | User on Base sends ETH with memo `SWAP_AND_LOCK:WIND:<duration>` → engine swaps in the WIND pool and creates the veNFT directly, without touching Solana |
-| **Increase / extend / merge / split / permanent / delegate** | Signed message, state-only |
-| **Unlock (after expiry)** | Signed `WITHDRAW` → threshold signers send SPL WIND from the vault to the user's Solana wallet |
-| **Claim emissions / rebase / bribes** | Credited to the internal balance. User can re-lock, swap, or withdraw to Solana |
-| **Weekly emissions** | At epoch flip, the engine runs `Minter.updatePeriod` and the threshold signers sign **one `mint_to` tx per week** into the vault, so on-chain supply always matches engine supply |
+| **Lock WIND** | `ft_transfer_call` WIND to the Wind Swap contract with `msg = {"lock": <duration>}` → veNFT created. Tokens stay in the contract. |
+| **Lock from any chain** | Deposit any asset on any chain → swap to WIND inside the contract → lock, in one action |
+| **Increase / extend / merge / split / permanent / delegate / vote / claim** | Contract calls (or signed messages relayed by a gasless relayer) |
+| **Unlock (after expiry)** | WIND returns to the user's internal balance; `withdraw` sends it to their NEAR wallet |
+| **Weekly emissions** | At the epoch flip the contract runs `Minter.update_period` and calls `mint` on the WIND token for the emission + rebase + team share |
 
 ### Supply invariant
 ```
-SPL total supply  =  WIND in user wallets (on-chain)  +  WIND held by vault
-WIND held by vault =  Σ internal balances  +  Σ locked amounts  +  WIND in pools  +  undistributed emissions
+WIND held by the Wind Swap contract = Σ internal balances + Σ locked amounts + WIND in pools + undistributed emissions
 ```
-Nodes check this every block. If it breaks, they halt withdrawals.
-
-### Why minting weekly instead of lazily on withdraw
-`Minter`'s tail emissions are a percentage of `totalSupply`. Minting each epoch keeps the on-chain supply, which explorers and CoinGecko show, equal to the engine's supply, and it costs one Solana tx a week.
+Checked by a view anyone can call; withdrawals halt if it ever breaks.
 
 ### Existing WIND on Sei / Base
-Holders bridge 1:1 into Solana WIND: send old WIND to the Sei or Base vault, and the engine credits the new WIND in their internal balance. They can then lock it or withdraw it to Solana. Old WIND stays in the vault permanently, which removes it from circulation.
+Holders migrate 1:1: send old WIND (or a veNFT) to the contract's Chain-Signatures-controlled address on Sei/Base. The contract credits NEAR WIND (or recreates the lock). Old WIND stays there permanently, out of circulation.
+
+---
+
+## Accounts: one account, every chain
+
+Each user has **one Wind Swap account**. Any number of wallets on any chain can be **linked** to it, so the user sees the **same balances, positions, veNFTs and rewards** whichever wallet they connect with.
+
+| Wallet type | How it is linked |
+|---|---|
+| NEAR account | It is the account itself (or links like any other wallet) |
+| EVM (MetaMask, Rabby…) | Sign an EIP-712 "link to account X" message; the contract verifies it with `ecrecover` (`env::ecrecover`) |
+| Solana / Sui / Aptos (Ed25519) | Sign the link message; verified with `env::ed25519_verify` |
+| Bitcoin | BIP-322 signed message (later) |
+
+- Linking needs a signature from **each** wallet (prove ownership) and from the account (consent). Unlinking needs the account.
+- Deposits from any linked wallet, on any chain, credit the same account. Withdrawals can go to any linked wallet on its chain.
+- Users who only have an EVM or Solana wallet never need a NEAR account: the account is created on first deposit and actions are signed messages relayed to NEAR (the relayer pays NEAR gas; fees are taken from the user's balance).
+- Engine side: the engine already uses a chain-agnostic 32-byte `AccountId`; the contract maps every linked wallet to that one id.
 
 ---
 
@@ -233,7 +242,7 @@ Holders bridge 1:1 into Solana WIND: send old WIND to the Sei or Base vault, and
 
 | Solidity (windv2 `contracts/`) | Rust module | Notes |
 |---|---|---|
-| `Wind.sol` | SPL mint on Solana + `engine::token` | On-chain SPL token whose mint authority is the TSS key; engine tracks internal balances; Minter triggers a weekly `mint_to` |
+| `Wind.sol` | NEP-141 token on NEAR (`wind.<project>.near`) | Mintable only by the Wind Swap v4 contract; Minter mints weekly emissions |
 | `VotingEscrow.sol` + `BalanceLogicLibrary`, `DelegationLogicLibrary` | `engine::ve` | veNFT locks (max 4 years), linear decay (slope/bias points), permanent locks, merge, split, delegation, managed veNFTs, user/global checkpoints |
 | `Voter.sol` | `engine::voter` | Weekly epochs, vote/reset/poke, gauge weights, create/kill/revive gauge, token whitelist, `distribute` emissions to gauges |
 | `Minter.sol` | `engine::minter` | Weekly emissions: 10M start, +3% for 14 epochs, then −1%/week, tail emissions at `TAIL_START`, 5% team rate, `nudge` via EpochGovernor |
@@ -301,8 +310,8 @@ Epoch flip (Thursday 00:00 UTC, consensus time)
 On-chain this needs someone to call `distribute()` with gas. Off-chain it runs automatically every epoch at zero cost.
 
 ### Migration from the existing Sei/Base deployments
-- **WIND:** users send old WIND to the Sei/Base vault and receive the same amount of Solana WIND in the engine. Old WIND stays in the vault permanently.
-- **veNFTs:** users transfer their veNFT to the vault address (ERC-721 transfers to an EOA work). The engine reads `locked(tokenId)` and recreates the lock with the same amount and end time, or as permanent, backed by Solana WIND. The on-chain veNFT stays held by the vault.
+- **WIND:** users send old WIND to the Sei/Base vault and receive the same amount of NEAR WIND. Old WIND stays in the vault permanently.
+- **veNFTs:** users transfer their veNFT to the vault address (ERC-721 transfers to an EOA work). The engine reads `locked(tokenId)` and recreates the lock with the same amount and end time, or as permanent, backed by NEAR WIND. The on-chain veNFT stays held by the vault.
 - **LP positions:** users withdraw from the on-chain pool and deposit the tokens into engine pools. An optional incentive period can encourage this.
 
 ---
@@ -478,9 +487,11 @@ The bond asset could be **$BTB / the Wind ve token**, which ties node security t
 - [ ] Testnet with 5–7 nodes
 
 ### Phase 4: Tokenomics, Staking & Voting (2–3 months)
-- [ ] Create WIND SPL mint on Solana devnet with the TSS key as mint authority + Metaplex metadata
-- [ ] Lock / unlock flows via the Solana vault (memo `LOCK`, signed `WITHDRAW`)
-- [ ] Minter (emission schedule, tail, team rate) → weekly TSS-signed `mint_to`
+- [ ] WIND NEP-141 token on NEAR testnet, minter = Wind Swap v4 contract
+- [ ] Lock / unlock via `ft_transfer_call` (`msg = {"lock": duration}`) and internal balances
+- [x] Minter port (emission schedule, tail, team rate, nudge) — engine side done
+- [ ] Contract mints weekly emissions on the WIND token at the epoch flip
+- [ ] Account linking: EVM (ecrecover) and Ed25519 wallets linked to one account
 - [ ] Supply-invariant check every block + halt on mismatch
 - [ ] VotingEscrow: create/increase/extend lock, withdraw, decay checkpoints
 - [ ] VotingEscrow: permanent locks, merge, split, delegation
@@ -526,14 +537,12 @@ The bond asset could be **$BTB / the Wind ve token**, which ties node security t
 
 ## Open Questions
 - NEAR vs own infrastructure: decided after Phase 0b (Chain Signatures latency, cost, deposit-verification trust)
-- If NEAR: option A (existing bridges) or B (own vaults + relayer)? Does the WIND SPL mint authority become a Chain Signatures-derived Solana key?
+- If NEAR: option A (existing bridges) or B (own vaults + relayer)?
 - Also act as a solver on NEAR Intents for extra volume?
 - Bond asset: $BTB / WIND / veNFT, or another asset?
 - Launch with the full ve(3,3) model, or pools first and tokenomics in a second release?
 - Continue the current Sei/Base emission schedule (carry over `weekly`, `epochCount`, `tailEmissionRate`), or restart it?
 - Should on-chain Sei/Base pools keep running alongside, or wind down after migration?
-- WIND decimals on Solana: 9 (native standard) or 18 (matches EVM WIND)?
-- SPL Token vs Token-2022 (Token-2022 adds transfer fees/hooks; classic SPL has wider wallet/DEX support)
 - Later: also allow withdrawing WIND to other chains (e.g. a mintable ERC-20 on EVM with the vault as minter)?
 - Node set size and threshold (e.g. 2/3 of 20 → 100)?
 - Fee split between LPs, voters, nodes, and the treasury
