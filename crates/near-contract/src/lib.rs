@@ -50,7 +50,8 @@
 //! - Chains: `set_evm_chain` stores the MPC signing path, the next nonce and the max fee cap.
 //!   The nonce only goes up. The owner cannot lower it, so a nonce cannot be reused.
 //! - Deposits: a relayer calls `report_evm_deposit` for each observed transfer. Each
-//!   `(chain_id, tx_hash, log_index)` is credited once. The credit goes to the owner of `from`
+//!   `(chain_id, tx_hash, log_index, asset)` is credited once (deposits credited before the asset
+//!   was part of the key are still checked by their `(chain_id, tx_hash, log_index)`). The credit goes to the owner of `from`
 //!   (its linked account, or its own id).
 //! - Withdrawals: `withdraw_evm` (NEAR account) or the signed `WithdrawEvm` debits the balance
 //!   and records a `Pending` withdrawal. A relayer calls `process_withdrawal`, which reserves
@@ -103,6 +104,9 @@ enum StorageKey {
     EvmChains,
     EvmDeposits,
     HasState,
+    // Appended after the v5 prefixes above.
+    /// Deposits keyed with the asset: `(chain_id, tx_hash, log_index, asset)`.
+    EvmDepositsByAsset,
 }
 
 #[near(contract_state)]
@@ -140,8 +144,12 @@ pub struct Contract {
     evm_asset_by_token: LookupMap<String, String>,
     /// EVM chain settings (signing path, next nonce, fee cap), keyed by chain id.
     evm_chains: LookupMap<u64, EvmChain>,
-    /// `(chain_id, tx_hash, log_index)` of every deposit already credited.
+    /// `(chain_id, tx_hash, log_index)` of every deposit credited before `evm_deposits_by_asset`
+    /// existed. Read only: a report is a duplicate if its legacy key or its asset key is here.
     evm_deposits: LookupSet<(u64, [u8; 32], u32)>,
+    /// `(chain_id, tx_hash, log_index, asset)` of every deposit credited since. The asset is in the
+    /// key because a native transfer and an ERC-20 `Transfer` can both be log 0 of one tx.
+    evm_deposits_by_asset: LookupSet<(u64, [u8; 32], u32, String)>,
     /// Owner ids that have ever been credited or had a position minted. A wallet whose own owner
     /// id is in this set cannot be linked. Set in `credit` and `mint_for`, and by
     /// `flag_wallet_state` for data from before v5.
@@ -1079,6 +1087,7 @@ impl Contract {
             evm_asset_by_token: LookupMap::new(StorageKey::EvmAssetByToken),
             evm_chains: LookupMap::new(StorageKey::EvmChains),
             evm_deposits: LookupSet::new(StorageKey::EvmDeposits),
+            evm_deposits_by_asset: LookupSet::new(StorageKey::EvmDepositsByAsset),
             has_state: LookupSet::new(StorageKey::HasState),
         }
     }
@@ -1134,6 +1143,7 @@ impl Contract {
             evm_asset_by_token: LookupMap::new(StorageKey::EvmAssetByToken),
             evm_chains: LookupMap::new(StorageKey::EvmChains),
             evm_deposits: LookupSet::new(StorageKey::EvmDeposits),
+            evm_deposits_by_asset: LookupSet::new(StorageKey::EvmDepositsByAsset),
             has_state: LookupSet::new(StorageKey::HasState),
         }
     }
@@ -1827,8 +1837,9 @@ impl Contract {
     /// Relayer only. Credits a deposit that the relayer saw on `chain_id`: `amount` of `asset`
     /// sent by `from` in log `log_index` of transaction `tx_hash` (use 0 for a native transfer).
     ///
-    /// Returns `false`, and changes nothing, if this `(chain_id, tx_hash, log_index)` was already
-    /// credited. Panics if the asset is not registered, if `amount` is zero, or if it is above
+    /// Returns `false`, and changes nothing, if this `(chain_id, tx_hash, log_index, asset)` was
+    /// already credited, or if `(chain_id, tx_hash, log_index)` was credited before the asset was
+    /// part of the key. Panics if the asset is not registered, if `amount` is zero, or if it is above
     /// the asset's per-deposit cap. The credit goes to the owner that `from` resolves to: its
     /// linked account, or its own owner id if it is not linked.
     pub fn report_evm_deposit(
@@ -1853,8 +1864,13 @@ impl Contract {
                     "asset {asset} on chain {chain_id} is not registered"
                 ))
             });
-        // A panic below reverts this insert too.
-        if !self.evm_deposits.insert((chain_id, hash, log_index)) {
+        // A report is a duplicate if its legacy key (no asset) or its asset key was credited.
+        // A panic below reverts the insert too.
+        if self.evm_deposits.contains(&(chain_id, hash, log_index))
+            || !self
+                .evm_deposits_by_asset
+                .insert((chain_id, hash, log_index, asset.clone()))
+        {
             return false;
         }
         if amount.0 == 0 {
