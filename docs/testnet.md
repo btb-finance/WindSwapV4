@@ -124,5 +124,6 @@ Wasm SHA-256 `03890a393061cc9a81ac4e2f8a4b23da5ea264292e37d15ad21f833157b818c5` 
 | Result | signed EIP-1559 raw tx `0x02f872…` returned by `on_evm_signed` |
 | Verification | `tools/chainsig-probe/payout-check.mjs`: signer recovers to the derived address, low-s, valid parity — PASS |
 
-Not broadcast: the derived address has no Base Sepolia ETH yet. Fund it from a Base Sepolia faucet, then broadcast the
-raw tx with any RPC (`eth_sendRawTransaction`) to complete a real cross-chain payout.
+**Broadcast on Base Sepolia — first cross-chain payout signed by the NEAR contract:**
+tx [`0x6aaac922d72ad4649e6bcf59be513a976a2f993f748374044a963cbba3c17277`](https://sepolia.basescan.org/tx/0x6aaac922d72ad4649e6bcf59be513a976a2f993f748374044a963cbba3c17277),
+status success, block 0x2ecd268, from `0xaa817ca355475d22d5a410f401dc877ec401259e` (the contract's derived address, funded with 0.1 ETH) to `0x…dEaD`, 0.000001 ETH, 21000 gas.
