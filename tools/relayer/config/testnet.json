@@ -1,0 +1,26 @@
+{
+  "near": {
+    "rpcUrl": "https://rpc.testnet.near.org",
+    "contractId": "windswapv4-btb.testnet",
+    "relayerAccountId": "windswapv4-relayer.testnet",
+    "credentialsPath": "~/.near-credentials/testnet/windswapv4-relayer.testnet.json",
+    "gasTgas": { "report": 50, "process": 200, "mark": 30 }
+  },
+  "evm": [
+    {
+      "name": "base-sepolia",
+      "chainId": 84532,
+      "rpcUrl": "https://sepolia.base.org",
+      "vault": "0xaa817ca355475d22d5a410f401dc877ec401259e",
+      "confirmations": 3,
+      "startBlock": 49116400,
+      "scanBatchSize": 200,
+      "requestsPerSecond": 20,
+      "blockConcurrency": 8
+    }
+  ],
+  "pollIntervalMs": 15000,
+  "stateDir": "state",
+  "withdrawalLimit": 20,
+  "fallbackAssets": []
+}

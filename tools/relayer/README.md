@@ -46,6 +46,43 @@ npm run once -- --config config/relayer.example.json --dry-run \
   --from-block 49070000 --to-block 49114828
 ```
 
+## Testnet (windswapv4-btb.testnet, Base Sepolia)
+
+`config/testnet.json` holds the live testnet values. It has no secrets: the key is read from
+`credentialsPath` only when running without `--dry-run`.
+
+- NEAR: `https://rpc.testnet.near.org`, contract `windswapv4-btb.testnet`, relayer account
+  `windswapv4-relayer.testnet` (registered with `add_relayer`).
+- EVM: Base Sepolia (chain 84532), `https://sepolia.base.org`, vault
+  `0xaa817ca355475d22d5a410f401dc877ec401259e`, `confirmations` 3, `startBlock` 49116400.
+- Assets come from the contract (`get_evm_assets`). The registry has one entry:
+  `chain_id 84532`, `asset "native"`, `token_id "base-sepolia:eth"`, 18 decimals,
+  `per_deposit_cap` 0.05 ETH. `fallbackAssets` is empty, so a failing `get_evm_assets` stops the
+  deposit stage.
+- Live views checked read-only: `get_evm_assets` and `get_evm_chain` return the fields the relayer
+  parses. `get_pending_withdrawals` and `get_signed_withdrawals` were both empty.
+  The `raw_tx` format is still unverified, since no signed withdrawal existed yet.
+
+Dry-run scan of blocks 49116400 to 49117920 (read-only):
+
+```bash
+npm run once -- --config config/testnet.json --dry-run --from-block 49116400 --to-block 49117920
+```
+
+It finds two native deposits from `0x0d53794e20e0e4f96e07bcd8487ce557c6d9a4ac`:
+
+- `0xaffaed4cd7f9ba2afb44e615ce3554ceb1102fb20a43fb3126143a070228e665`, block 49116593, 0.004 ETH
+- `0xefa045cc9e47a02d76e25c40be0ca572ef467407cd05c4330356f0c3d4ca1a76`, block 49117347, 0.003 ETH
+
+Live run (sends `report_evm_deposit`; both should return `false` if already reported):
+
+```bash
+npm run once -- --config config/testnet.json --from-block 49116400 --to-block <latest-3>
+```
+
+Use `--from-block` only for the first run. After that the cursor in `state/base-sepolia.json`
+takes over. Delete the state file to rescan.
+
 ## Configuration
 
 Config is JSON (see `config/relayer.example.json`). Env overrides for the NEAR section:

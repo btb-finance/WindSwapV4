@@ -59,18 +59,20 @@ export function createNearReader(cfg: NearConfig, fetchImpl: typeof fetch = fetc
 }
 
 interface CredentialsFile {
-  account_id: string;
-  public_key: string;
+  account_id?: string;
+  public_key?: string;
   private_key: string;
 }
 
 /** Change calls signed by the relayer's NEAR account. Never constructed in dry-run. */
 export function createNearWriter(cfg: NearConfig): NearWriter {
   const creds = JSON.parse(readFileSync(cfg.credentialsPath, "utf8")) as Partial<CredentialsFile>;
-  if (!creds.account_id || !creds.private_key) {
-    throw new Error(`credentials file ${cfg.credentialsPath} must contain account_id and private_key`);
+  if (!creds.private_key) {
+    throw new Error(`credentials file ${cfg.credentialsPath} must contain private_key`);
   }
-  if (creds.account_id !== cfg.relayerAccountId) {
+  // Seed-phrase keychain files (master_seed_phrase, implicit_account_id) have no account_id;
+  // the configured relayerAccountId is authoritative in that case.
+  if (creds.account_id !== undefined && creds.account_id !== cfg.relayerAccountId) {
     throw new Error(`credentials are for ${creds.account_id}, config relayerAccountId is ${cfg.relayerAccountId}`);
   }
   const provider = new JsonRpcProvider({ url: cfg.rpcUrl });
