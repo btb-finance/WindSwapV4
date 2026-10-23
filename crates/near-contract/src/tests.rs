@@ -3,6 +3,8 @@
 use super::*;
 use near_sdk::test_utils::VMContextBuilder;
 use near_sdk::{testing_env, PromiseResult};
+use windswap_engine::error::MathError;
+use windswap_engine::fees::ZERO_FEE_INDICATOR;
 
 const OWNER: &str = "owner.testnet";
 const ALICE: &str = "alice.testnet";
@@ -19,6 +21,14 @@ const Q96_STR: &str = "79228162514264337593543950336";
 const MIN_LIMIT: &str = "4295128740";
 const MAX_LIMIT: &str = "1461446703485210103287273052203988822378723970341";
 const FUNDS: u128 = 1_000_000_000_000_000_000_000_000; // 1e24
+/// USDT: the third token, used by the two-pool routes (USDC -> WNEAR -> USDT).
+const USDT: &str = "usdt.fakes.testnet";
+/// Liquidity minted in each route test pool, around tick 0.
+const LIQUIDITY: u128 = 1_000_000_000_000_000_000; // 1e18
+/// Input the trader gets in each route test.
+const TRADER_FUNDS: u128 = 1_000_000_000_000_000_000; // 1e18
+const AMOUNT_IN: u128 = 1_000_000_000_000_000; // 1e15
+const AMOUNT_OUT: u128 = 100_000_000_000_000; // 1e14
 
 fn acct(s: &str) -> AccountId {
     s.parse().unwrap()
@@ -485,4 +495,276 @@ fn migrate_reads_v0_state() {
     set_ctx(USDC, 1_000);
     let _ = c.ft_on_transfer(acct(ALICE), U128(8), String::new());
     assert_eq!(balance(&c, ALICE, USDC), 50);
+}
+
+// ---- Multi-hop routes, quotes and fee admin ----
+
+/// Pool 0 is USDC/WNEAR and pool 1 is WNEAR/USDT, both at price 1 with liquidity from ALICE.
+/// BOB holds `TRADER_FUNDS` of USDC. Block time is 1020 for everything after this.
+fn two_pools() -> (Contract, u64, u64) {
+    let mut c = setup();
+    let p0 = c.create_pool(USDC.into(), WNEAR.into(), TICK_SPACING, Q96_STR.into());
+    let p1 = c.create_pool(WNEAR.into(), USDT.into(), TICK_SPACING, Q96_STR.into());
+    for token in [USDC, WNEAR, USDT] {
+        fund(&mut c, ALICE, token, FUNDS);
+    }
+    set_ctx(ALICE, 1_010);
+    c.mint_position(p0, -600, 600, U128(LIQUIDITY));
+    c.mint_position(p1, -600, 600, U128(LIQUIDITY));
+    fund(&mut c, BOB, USDC, TRADER_FUNDS);
+    set_ctx(BOB, 1_020);
+    (c, p0, p1)
+}
+
+fn hop_in(pool_id: u64, token_in: &str) -> HopInput {
+    HopInput {
+        pool_id,
+        token_in: acct(token_in),
+    }
+}
+
+/// USDC -> WNEAR through `p0`, then WNEAR -> USDT through `p1`.
+fn two_hop_path(p0: u64, p1: u64) -> Vec<HopInput> {
+    vec![hop_in(p0, USDC), hop_in(p1, WNEAR)]
+}
+
+fn pool_state(c: &Contract, pool_id: u64) -> ClPool {
+    c.pool_ref(pool_id).clone()
+}
+
+#[test]
+fn two_hop_exact_input_matches_quote() {
+    let (mut c, p0, p1) = two_pools();
+    let path = two_hop_path(p0, p1);
+    let quoted = c.quote_exact_input(path.clone(), U128(AMOUNT_IN)).0;
+    assert!(quoted > 0);
+
+    let usdc_before = balance(&c, BOB, USDC);
+    let out = c.swap_exact_input(path, U128(AMOUNT_IN), U128(0)).0;
+    assert_eq!(out, quoted);
+    assert_eq!(balance(&c, BOB, USDC), usdc_before - AMOUNT_IN);
+    assert_eq!(balance(&c, BOB, USDT), out);
+    // The intermediate token never reaches the trader's balance.
+    assert_eq!(balance(&c, BOB, WNEAR), 0);
+    // Both pools were written back: the price moved down in each.
+    assert!(c.get_pool(p0).slot0.tick < 0);
+    assert!(c.get_pool(p1).slot0.tick < 0);
+}
+
+#[test]
+fn quotes_do_not_change_state() {
+    let (c, p0, p1) = two_pools();
+    let path = two_hop_path(p0, p1);
+    let pool0_before = pool_state(&c, p0);
+    let pool1_before = pool_state(&c, p1);
+    let bob_before = (balance(&c, BOB, USDC), balance(&c, BOB, USDT));
+
+    let q_in = c.quote_exact_input(path.clone(), U128(AMOUNT_IN)).0;
+    let q_out = c.quote_exact_output(path.clone(), U128(AMOUNT_OUT)).0;
+    assert!(q_in > 0 && q_out > 0);
+    // Quoting is deterministic.
+    assert_eq!(c.quote_exact_input(path, U128(AMOUNT_IN)).0, q_in);
+
+    assert_eq!(pool_state(&c, p0), pool0_before);
+    assert_eq!(pool_state(&c, p1), pool1_before);
+    assert_eq!((balance(&c, BOB, USDC), balance(&c, BOB, USDT)), bob_before);
+}
+
+#[test]
+fn exact_output_delivers_exact_amount_within_max() {
+    let (mut c, p0, p1) = two_pools();
+    let path = two_hop_path(p0, p1);
+    let quoted_in = c.quote_exact_output(path.clone(), U128(AMOUNT_OUT)).0;
+    let max_in = quoted_in + 1_000_000;
+
+    let usdc_before = balance(&c, BOB, USDC);
+    let paid = c.swap_exact_output(path, U128(AMOUNT_OUT), U128(max_in)).0;
+    assert_eq!(paid, quoted_in);
+    assert!(paid <= max_in);
+    assert_eq!(balance(&c, BOB, USDC), usdc_before - paid);
+    assert_eq!(balance(&c, BOB, USDT), AMOUNT_OUT);
+    assert_eq!(balance(&c, BOB, WNEAR), 0);
+}
+
+#[test]
+#[should_panic(expected = "TooLittleReceived")]
+fn exact_input_slippage_panics() {
+    let (mut c, p0, p1) = two_pools();
+    let path = two_hop_path(p0, p1);
+    let quoted = c.quote_exact_input(path.clone(), U128(AMOUNT_IN)).0;
+    c.swap_exact_input(path, U128(AMOUNT_IN), U128(quoted + 1));
+}
+
+#[test]
+#[should_panic(expected = "TooMuchRequested")]
+fn exact_output_above_max_panics() {
+    let (mut c, p0, p1) = two_pools();
+    let path = two_hop_path(p0, p1);
+    let quoted_in = c.quote_exact_output(path.clone(), U128(AMOUNT_OUT)).0;
+    c.swap_exact_output(path, U128(AMOUNT_OUT), U128(quoted_in - 1));
+}
+
+/// A slippage failure is an `Err` from the router, and `swap_exact_input` panics on it. In a
+/// unit test a panic aborts the test, so this checks the same route through the internal
+/// helper. The helper runs on working copies, and only a successful swap writes them back.
+#[test]
+fn failed_route_leaves_contract_state_unchanged() {
+    let (c, p0, p1) = two_pools();
+    let path = two_hop_path(p0, p1);
+    let quoted = c.quote_exact_input(path.clone(), U128(AMOUNT_IN)).0;
+    let pool0_before = pool_state(&c, p0);
+    let pool1_before = pool_state(&c, p1);
+    let bob_before = (balance(&c, BOB, USDC), balance(&c, BOB, USDT));
+
+    let resolved = c.resolve_path(&path);
+    let mut working = c.working_pools(&resolved.hops);
+    let result = c.route_exact_input(
+        &resolved,
+        &mut working,
+        engine_account(&acct(BOB)),
+        AMOUNT_IN,
+        quoted + 1,
+    );
+    assert_eq!(result, Err(MathError::TooLittleReceived));
+
+    assert_eq!(pool_state(&c, p0), pool0_before);
+    assert_eq!(pool_state(&c, p1), pool1_before);
+    assert_eq!((balance(&c, BOB, USDC), balance(&c, BOB, USDT)), bob_before);
+}
+
+#[test]
+#[should_panic(expected = "empty path")]
+fn empty_path_panics() {
+    let (mut c, _, _) = two_pools();
+    c.swap_exact_input(vec![], U128(AMOUNT_IN), U128(0));
+}
+
+#[test]
+#[should_panic(expected = "token not in pool")]
+fn token_not_in_pool_panics() {
+    let (mut c, p0, _) = two_pools();
+    // USDT is not in pool 0.
+    c.swap_exact_input(vec![hop_in(p0, USDT)], U128(AMOUNT_IN), U128(0));
+}
+
+#[test]
+#[should_panic(expected = "discontinuous path at hop 1")]
+fn discontinuous_path_panics() {
+    let (mut c, p0, p1) = two_pools();
+    // Hop 0 outputs WNEAR, but hop 1 takes USDT.
+    let path = vec![hop_in(p0, USDC), hop_in(p1, USDT)];
+    c.swap_exact_input(path, U128(AMOUNT_IN), U128(0));
+}
+
+#[test]
+#[should_panic(expected = "pool 9 does not exist")]
+fn unknown_pool_in_path_panics() {
+    let (c, _, _) = two_pools();
+    c.quote_exact_input(vec![hop_in(9, USDC)], U128(AMOUNT_IN));
+}
+
+#[test]
+#[should_panic(expected = "only owner")]
+fn enable_tick_spacing_rejects_non_owner() {
+    let mut c = setup();
+    set_ctx(ALICE, 1_000);
+    c.enable_tick_spacing(7, 500);
+}
+
+#[test]
+#[should_panic(expected = "only owner")]
+fn set_custom_swap_fee_rejects_non_owner() {
+    let (mut c, p0, _) = two_pools();
+    set_ctx(ALICE, 1_020);
+    c.set_custom_swap_fee(p0, 1_000);
+}
+
+#[test]
+#[should_panic(expected = "only owner")]
+fn set_custom_unstaked_fee_rejects_non_owner() {
+    let (mut c, p0, _) = two_pools();
+    set_ctx(ALICE, 1_020);
+    c.set_custom_unstaked_fee(p0, 1_000);
+}
+
+#[test]
+#[should_panic(expected = "only owner")]
+fn set_fee_whitelist_rejects_non_owner() {
+    let (mut c, _, _) = two_pools();
+    set_ctx(ALICE, 1_020);
+    c.set_fee_whitelist(acct(ALICE), true);
+}
+
+#[test]
+fn enable_tick_spacing_is_usable_by_new_pools() {
+    let mut c = setup();
+    c.enable_tick_spacing(7, 500);
+    let pool = c.create_pool(USDC.into(), WNEAR.into(), 7, Q96_STR.into());
+    assert_eq!(c.get_fee(pool, acct(BOB)), 500);
+}
+
+#[test]
+#[should_panic(expected = "InvalidInput")]
+fn enable_tick_spacing_rejects_enabled_spacing() {
+    let mut c = setup();
+    c.enable_tick_spacing(TICK_SPACING, 500);
+}
+
+#[test]
+#[should_panic(expected = "pool 9 does not exist")]
+fn set_custom_swap_fee_rejects_unknown_pool() {
+    let mut c = setup();
+    c.set_custom_swap_fee(9, 1_000);
+}
+
+#[test]
+fn get_fee_defaults_to_tick_spacing_fee() {
+    let (c, p0, _) = two_pools();
+    assert_eq!(c.get_fee(p0, acct(BOB)), 300);
+}
+
+#[test]
+fn custom_swap_fee_changes_get_fee_and_swap_output() {
+    let (mut c, p0, p1) = two_pools();
+    let path = two_hop_path(p0, p1);
+    let before = c.quote_exact_input(path.clone(), U128(AMOUNT_IN)).0;
+
+    set_ctx(OWNER, 1_020);
+    c.set_custom_swap_fee(p0, 1_000);
+    assert_eq!(c.get_fee(p0, acct(BOB)), 1_000);
+    assert_eq!(c.get_fee(p1, acct(BOB)), 300, "other pools keep their fee");
+
+    let after = c.quote_exact_input(path.clone(), U128(AMOUNT_IN)).0;
+    assert!(after < before, "a higher fee gives less output");
+
+    set_ctx(BOB, 1_020);
+    let out = c.swap_exact_input(path, U128(AMOUNT_IN), U128(0)).0;
+    assert_eq!(out, after);
+}
+
+#[test]
+fn whitelisted_trader_pays_zero_fee() {
+    let (mut c, p0, p1) = two_pools();
+    let path = two_hop_path(p0, p1);
+
+    // Reference: 0% on both pools (the 420 marker). The views quote a non-whitelisted trader,
+    // so this is the output a whitelisted trader should get.
+    set_ctx(OWNER, 1_020);
+    c.set_custom_swap_fee(p0, ZERO_FEE_INDICATOR);
+    c.set_custom_swap_fee(p1, ZERO_FEE_INDICATOR);
+    let zero_fee_out = c.quote_exact_input(path.clone(), U128(AMOUNT_IN)).0;
+
+    c.set_custom_swap_fee(p0, 0);
+    c.set_custom_swap_fee(p1, 0);
+    let normal_out = c.quote_exact_input(path.clone(), U128(AMOUNT_IN)).0;
+    assert!(normal_out < zero_fee_out);
+
+    c.set_fee_whitelist(acct(BOB), true);
+    assert_eq!(c.get_fee(p0, acct(BOB)), 0);
+    assert_eq!(c.get_fee(p1, acct(BOB)), 0);
+    assert_eq!(c.get_fee(p0, acct(ALICE)), 300, "others still pay");
+
+    set_ctx(BOB, 1_020);
+    let out = c.swap_exact_input(path, U128(AMOUNT_IN), U128(0)).0;
+    assert_eq!(out, zero_fee_out);
 }

@@ -22,9 +22,15 @@
 //!   (on by default). Build mainnet with `--no-default-features`.
 //! - Each pool is one Borsh blob in `pools`. This is fine for v0 but should move to
 //!   per-tick / per-position storage later, since the blob grows with every tick.
-//! - Fees are the static `FeeConfig::default()`. There is no admin method to change them yet.
-//! - No gauges: `unstaked_fee` is always computed with `gauge_alive = false`.
+//! - Fees start from `FeeConfig::default()`. The owner changes them with `enable_tick_spacing`,
+//!   `set_custom_swap_fee`, `set_custom_unstaked_fee` and `set_fee_whitelist`.
+//! - No gauges: `unstaked_fee` is always computed with `gauge_alive = false`. So a custom
+//!   unstaked fee is stored but does not change any swap output yet.
+//! - Multi-hop routes (`swap_exact_input`, `swap_exact_output`, quotes) run on working copies
+//!   of the touched pools. Only a successful swap writes them back.
 //! - No Chain Signatures: the engine's `[u8; 32]` account id is `sha256(account_id)`.
+
+use std::collections::BTreeMap;
 
 use near_sdk::json_types::U128;
 use near_sdk::store::{IterableMap, IterableSet, LookupMap};
@@ -35,6 +41,7 @@ use near_sdk::{
 use windswap_engine::error::Result as EngineResult;
 use windswap_engine::fees::FeeConfig;
 use windswap_engine::pool::cl_pool::ClPool;
+use windswap_engine::router::{Hop, Router};
 use windswap_engine::{I256, U256};
 
 #[near(serializers = [borsh])]
@@ -106,6 +113,27 @@ pub struct PositionView {
     pub tokens_owed0: U128,
     pub tokens_owed1: U128,
 }
+
+/// One hop of a multi-hop route as passed by the caller. `token_in` is the token paid into
+/// this hop. The output token is the other token of the pool.
+#[derive(Clone)]
+#[near(serializers = [json])]
+pub struct HopInput {
+    pub pool_id: u64,
+    pub token_in: AccountId,
+}
+
+/// A validated route: engine hops plus the tokens at both ends.
+struct Route {
+    hops: Vec<Hop>,
+    token_in: String,
+    token_out: String,
+}
+
+/// The trader used by the views. It is the all-zero engine account, so views quote the fees
+/// a non-whitelisted account pays. Whitelisted accounts pay 0 on a swap, so a swap by them can
+/// return more than the matching view.
+const QUOTE_TRADER: [u8; 32] = [0u8; 32];
 
 /// The NEP-141 interface of a token contract, used for withdrawals.
 #[allow(dead_code)]
@@ -229,6 +257,96 @@ impl Contract {
             self.debit(account, token, to_u128(delta.into_raw()));
         } else if delta.is_negative() {
             self.credit(account, token, to_u128(delta.unsigned_abs()));
+        }
+    }
+
+    /// Checks a path and turns it into engine hops. Panics on an empty path, a hop whose
+    /// input token is not the previous hop's output, a token that is not in its pool, or an
+    /// unknown pool.
+    fn resolve_path(&self, path: &[HopInput]) -> Route {
+        if path.is_empty() {
+            env::panic_str("empty path");
+        }
+        let token_in = path[0].token_in.to_string();
+        let mut current = token_in.clone();
+        let mut hops = Vec::with_capacity(path.len());
+        for (i, input) in path.iter().enumerate() {
+            if input.token_in.as_str() != current.as_str() {
+                env::panic_str(&format!("discontinuous path at hop {i}"));
+            }
+            let (token0, token1) = self.tokens_of(input.pool_id);
+            let (zero_for_one, token_out) = if current == token0 {
+                (true, token1)
+            } else if current == token1 {
+                (false, token0)
+            } else {
+                env::panic_str(&format!(
+                    "token not in pool: {current} is not in pool {}",
+                    input.pool_id
+                ));
+            };
+            hops.push(Hop {
+                pool_id: input.pool_id,
+                zero_for_one,
+            });
+            current = token_out;
+        }
+        Route {
+            hops,
+            token_in,
+            token_out: current,
+        }
+    }
+
+    /// Working copies of the pools a route touches. The route runs on these copies, and only a
+    /// successful swap writes them back.
+    fn working_pools(&self, hops: &[Hop]) -> BTreeMap<u64, ClPool> {
+        hops.iter()
+            .map(|hop| (hop.pool_id, self.pool_ref(hop.pool_id).clone()))
+            .collect()
+    }
+
+    /// Engine exact-input route on `pools`. Returns the engine error without panicking, so a
+    /// caller can show that a failed route leaves the stored pools unchanged.
+    fn route_exact_input(
+        &self,
+        route: &Route,
+        pools: &mut BTreeMap<u64, ClPool>,
+        trader: [u8; 32],
+        amount_in: u128,
+        min_out: u128,
+    ) -> EngineResult<U256> {
+        Router {
+            store: pools,
+            fees: &self.fee_config,
+            trader,
+            time: now(),
+        }
+        .exact_input(&route.hops, U256::from(amount_in), U256::from(min_out))
+    }
+
+    /// Engine exact-output route on `pools`. See `route_exact_input`.
+    fn route_exact_output(
+        &self,
+        route: &Route,
+        pools: &mut BTreeMap<u64, ClPool>,
+        trader: [u8; 32],
+        amount_out: u128,
+        max_in: u128,
+    ) -> EngineResult<U256> {
+        Router {
+            store: pools,
+            fees: &self.fee_config,
+            trader,
+            time: now(),
+        }
+        .exact_output(&route.hops, U256::from(amount_out), U256::from(max_in))
+    }
+
+    /// Writes the working copies of a successful route back to the pool storage.
+    fn write_back(&mut self, pools: BTreeMap<u64, ClPool>) {
+        for (id, pool) in pools {
+            self.pools.insert(id, pool);
         }
     }
 }
@@ -534,6 +652,117 @@ impl Contract {
             tokens_owed0: U128(position.tokens_owed0),
             tokens_owed1: U128(position.tokens_owed1),
         }
+    }
+
+    /// Multi-hop exact-input swap for the caller. Spends exactly `amount_in` of the first hop's
+    /// input token and credits the caller with the output of the last hop. Panics if that
+    /// output is below `min_amount_out`, or if the caller's balance is too small. Returns the
+    /// output amount.
+    pub fn swap_exact_input(
+        &mut self,
+        path: Vec<HopInput>,
+        amount_in: U128,
+        min_amount_out: U128,
+    ) -> U128 {
+        let caller = env::predecessor_account_id();
+        let route = self.resolve_path(&path);
+        let mut pools = self.working_pools(&route.hops);
+        let out = ok(self.route_exact_input(
+            &route,
+            &mut pools,
+            engine_account(&caller),
+            amount_in.0,
+            min_amount_out.0,
+        ));
+        let out = to_u128(out);
+        self.debit(&caller, &route.token_in, amount_in.0);
+        self.credit(&caller, &route.token_out, out);
+        self.write_back(pools);
+        U128(out)
+    }
+
+    /// Multi-hop exact-output swap for the caller. Credits exactly `amount_out` of the last
+    /// hop's output token and debits the caller for the input the route needs. Panics if that
+    /// input is above `max_amount_in`, or if the caller's balance is too small. Returns the
+    /// input amount actually debited.
+    pub fn swap_exact_output(
+        &mut self,
+        path: Vec<HopInput>,
+        amount_out: U128,
+        max_amount_in: U128,
+    ) -> U128 {
+        let caller = env::predecessor_account_id();
+        let route = self.resolve_path(&path);
+        let mut pools = self.working_pools(&route.hops);
+        let paid = ok(self.route_exact_output(
+            &route,
+            &mut pools,
+            engine_account(&caller),
+            amount_out.0,
+            max_amount_in.0,
+        ));
+        let paid = to_u128(paid);
+        self.debit(&caller, &route.token_in, paid);
+        self.credit(&caller, &route.token_out, amount_out.0);
+        self.write_back(pools);
+        U128(paid)
+    }
+
+    /// Output of `swap_exact_input` for `path` and `amount_in`, at the current block time.
+    /// Uses the fees of `QUOTE_TRADER` (see that constant). Changes no state.
+    pub fn quote_exact_input(&self, path: Vec<HopInput>, amount_in: U128) -> U128 {
+        let route = self.resolve_path(&path);
+        let mut pools = self.working_pools(&route.hops);
+        let out = ok(self.route_exact_input(&route, &mut pools, QUOTE_TRADER, amount_in.0, 0));
+        U128(to_u128(out))
+    }
+
+    /// Input that `swap_exact_output` would debit for `path` and `amount_out`, at the current
+    /// block time. Uses the fees of `QUOTE_TRADER`. Changes no state.
+    pub fn quote_exact_output(&self, path: Vec<HopInput>, amount_out: U128) -> U128 {
+        let route = self.resolve_path(&path);
+        let mut pools = self.working_pools(&route.hops);
+        let paid =
+            ok(self.route_exact_output(&route, &mut pools, QUOTE_TRADER, amount_out.0, u128::MAX));
+        U128(to_u128(paid))
+    }
+
+    /// Owner only. Enables a tick spacing with its swap fee, in hundredths of a bip. Pools
+    /// can then be created with that spacing.
+    pub fn enable_tick_spacing(&mut self, tick_spacing: i32, fee: u32) {
+        self.assert_owner();
+        ok(self.fee_config.enable_tick_spacing(tick_spacing, fee));
+    }
+
+    /// Owner only. Sets the swap fee of one pool, in hundredths of a bip. `0` clears it. The
+    /// value `420` means a fee of 0%.
+    pub fn set_custom_swap_fee(&mut self, pool_id: u64, fee: u32) {
+        self.assert_owner();
+        self.pool_ref(pool_id);
+        ok(self.fee_config.set_custom_swap_fee(pool_id, fee));
+    }
+
+    /// Owner only. Sets the unstaked fee of one pool, in hundredths of a bip. `0` clears it.
+    /// The value `420` means a fee of 0%. No gauges exist yet, so this does not affect swaps.
+    pub fn set_custom_unstaked_fee(&mut self, pool_id: u64, fee: u32) {
+        self.assert_owner();
+        self.pool_ref(pool_id);
+        ok(self.fee_config.set_custom_unstaked_fee(pool_id, fee));
+    }
+
+    /// Owner only. Adds or removes `account_id` from the swap fee whitelist. A whitelisted
+    /// account pays a swap fee of 0 on every pool.
+    pub fn set_fee_whitelist(&mut self, account_id: AccountId, whitelisted: bool) {
+        self.assert_owner();
+        self.fee_config
+            .set_whitelist(engine_account(&account_id), whitelisted);
+    }
+
+    /// Swap fee that `account_id` pays on `pool_id`, in hundredths of a bip.
+    pub fn get_fee(&self, pool_id: u64, account_id: AccountId) -> u32 {
+        let tick_spacing = self.pool_ref(pool_id).tick_spacing;
+        self.fee_config
+            .swap_fee(pool_id, tick_spacing, &engine_account(&account_id))
     }
 
     /// Internal balance of `account_id` for `token`.
