@@ -22,15 +22,33 @@ docs/plan.md     Architecture, decisions and roadmap
 
 ## Status
 
-Phase 0 — engine port:
+Engine (Rust, `crates/engine`) — every module is differentially tested against the original Solidity:
 
-- [x] Concentrated-liquidity math: `FullMath`, `UnsafeMath`, `BitMath`, `LiquidityMath`, `TickMath`, `SqrtPriceMath`, `SwapMath`
-- [x] Ticks (with staked liquidity + reward growth), tick bitmap, positions (staked), oracle
-- [x] Fee config: tick-spacing fees, custom swap/unstaked fees, whitelist
-- [x] CL pool: initialize, mint, burn, collect, swap, stake, reward growth, gauge fees
-- [ ] CL pool differential test against the real `CLPool.sol`
-- [x] NEAR contract v0 deployed to testnet: `windswapv4-btb.testnet` (see [docs/testnet.md](docs/testnet.md))
-- [ ] Router + quoter
+- [x] CL math (`FullMath`, `TickMath`, `SqrtPriceMath`, `SwapMath`, …), ticks, tick bitmap, positions, oracle
+- [x] CL pool (mint, burn, collect, swap, stake, reward growth, gauge fees) — 5,508 random ops vs `CLPool.sol`
+- [x] Fee config, multi-hop router + quoter
+- [x] Minter (weekly emissions, tail, team rate, nudge)
+- [x] VotingEscrow (locks, decay, merge, split, permanent, delegation, managed veNFTs)
+- [x] Voting rewards (fees, bribes, locked/free managed rewards)
+- [x] CL gauge (LP staking emissions)
+- [x] Voter (votes, gauge weights, distribute, claims)
+- [x] RewardsDistributor (rebase)
+
+NEAR contract (`crates/near-contract`), live on testnet `windswapv4-btb.testnet` (see [docs/testnet.md](docs/testnet.md)):
+
+- [x] Pools, swaps, multi-hop routing, quotes, liquidity, fee admin
+- [x] NEP-141 deposits and withdrawals
+- [x] One account, every chain: EVM / Ed25519 wallet linking, signed actions relayed by anyone (MetaMask-only user swapped and added liquidity on testnet)
+- [x] Chain Signatures: contract-signed payout confirmed on Base Sepolia
+- [ ] EVM deposits + withdrawals via relayer (in progress)
+- [ ] ve(3,3) in the contract: locks, voting, epoch flip, WIND emissions
+- [ ] Per-tick storage (pools are one blob each today)
+
+Other:
+
+- [x] WIND token (`crates/wind-token`), testnet `windswapv4-wind.testnet`, minter = the contract
+- [x] TypeScript SDK (`sdk/`)
+- [x] Frontend: v4 pages on the `v4-near` branch of `windswapfrontend-mainnet`
 
 ## Correctness: differential testing
 
