@@ -9,6 +9,8 @@ type FieldType =
   | "u64" | "i32" | "bool" | "string"
   | "u128" | "u256" | "i256"
   | "u64[]" | "u128[]" | "string[]" | "hop[]"
+  // `to` of a swap intent: "internal" | "near:<account>" | "evm:0x<40 lowercase hex>".
+  | "intent_to"
   // An optional trailing bool that the contract serialises only when true
   // (`#[serde(default, skip_serializing_if = "is_false")]`): absent, or exactly `true`.
   | "true?";
@@ -46,6 +48,25 @@ export const UNIT_ACTIONS: ReadonlyArray<string> = ["Distribute"];
 
 const HOP_FIELDS: ReadonlyArray<readonly [string, FieldType]> = [["pool_id", "u64"], ["token_in", "string"]];
 
+/**
+ * Field order of each `Intent` variant (crates/near-contract, `Intent` enum). The intent message is
+ * signed as `JSON.stringify(intent)`, so the same order rule as `SIGNED_ACTION_FIELDS` applies.
+ */
+export const INTENT_FIELDS: Readonly<Record<string, ReadonlyArray<readonly [string, FieldType]>>> = {
+  Swap: [["token_in", "string"], ["amount_in", "u128"], ["path", "hop[]"], ["min_amount_out", "u128"], ["to", "intent_to"]],
+  AddLiquidity: [
+    ["token_in", "string"],
+    ["amount_in", "u128"],
+    ["pool_id", "u64"],
+    ["tick_lower", "i32"],
+    ["tick_upper", "i32"],
+    ["min_liquidity", "u128"],
+  ],
+};
+
+/** `internal`, a NEAR account (lowercase, 2 to 64 characters), or a lowercase EVM address. */
+const INTENT_TO = /^(internal|near:[a-z0-9._-]{2,64}|evm:0x[0-9a-f]{40})$/;
+
 /** Upper bounds that keep a single call within the gas the relayer reserves. */
 export const MAX_LIST_LENGTH = 32;
 export const MAX_STRING_LENGTH = 256;
@@ -66,6 +87,25 @@ export function isPlainObject(v: unknown): v is Record<string, unknown> {
  * variants, variants not in `allowed`, and any object whose keys are not exactly the variant's
  * fields in declaration order.
  */
+/**
+ * Checks an intent against the `Intent` variant table and returns its variant name. Rejects unknown
+ * variants and any object whose keys are not exactly the variant's fields in declaration order.
+ */
+export function checkIntent(intent: unknown): string {
+  if (!isPlainObject(intent)) throw bad("intent must be an object with exactly one variant key");
+  const keys = Object.keys(intent);
+  if (keys.length !== 1) throw bad("intent must be an object with exactly one variant key");
+  const variant = keys[0] as string;
+  const fields = INTENT_FIELDS[variant];
+  if (!fields || !Object.prototype.hasOwnProperty.call(INTENT_FIELDS, variant)) {
+    throw bad(`unknown intent variant "${variant}"`);
+  }
+  const body = intent[variant];
+  if (!isPlainObject(body)) throw bad(`${variant} must be an object`);
+  checkFields(body, fields, variant);
+  return variant;
+}
+
 export function checkAction(action: unknown, allowed: readonly string[] | "*"): string {
   if (typeof action === "string") {
     if (!UNIT_ACTIONS.includes(action)) throw bad(`unknown action variant "${action}"`);
@@ -143,6 +183,11 @@ function checkValue(v: unknown, type: FieldType, path: string): void {
       return;
     case "string[]":
       checkList(v, path, (item, p) => checkValue(item, "string", p));
+      return;
+    case "intent_to":
+      if (typeof v !== "string" || !INTENT_TO.test(v)) {
+        throw bad(`${path} must be "internal", "near:<account>" or "evm:0x<40 lowercase hex>"`);
+      }
       return;
     case "hop[]":
       checkList(v, path, (item, p) => {

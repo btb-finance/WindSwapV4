@@ -94,7 +94,7 @@ async function main(): Promise<number> {
 
   const server = args.command === "run" && args.http ? await startHttp(config, log) : null;
 
-  const deps = { config, near, writer, readers, dryRun: args.dryRun, log, shouldStop };
+  const deps = { config, near, writer, readers, dryRun: args.dryRun, log, shouldStop, intentStatus: new Map<number, string>() };
   const opts = { fromBlock: args.fromBlock, toBlock: args.toBlock };
 
   if (args.command === "once") {
@@ -124,7 +124,9 @@ async function startHttp(config: ReturnType<typeof loadConfig>, log: typeof cons
     contractId: config.near.contractId,
     relayerAccountId: config.near.relayerAccountId,
     executeTgas: config.near.gasTgas.execute,
+    intentTgas: { submit: config.near.gasTgas.submitIntent, cancel: config.near.gasTgas.cancelIntent },
     writer: createNearWriter(config.near),
+    reader: createNearReader(config.near),
     log,
   });
   const server = createRelayServer({ service, config: config.relay, log });

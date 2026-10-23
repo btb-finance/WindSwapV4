@@ -10,6 +10,7 @@ import {
   VOTE,
   evmSigner,
   mockExecuteWriter,
+  mockIntentReader,
   relayCfg,
   signedEnvelope,
   type MockExecuteWriter,
@@ -28,6 +29,7 @@ async function start(config: Record<string, unknown> = {}): Promise<void> {
     relayerAccountId: RELAYER,
     executeTgas: 300,
     writer,
+    reader: mockIntentReader(),
     log: recordingLog(),
   });
   server = createRelayServer({ service, config: cfg, log: recordingLog() });
@@ -102,7 +104,7 @@ describe("POST /v1/execute", () => {
     await stop();
     writer = mockExecuteWriter({ error: new Error("Smart contract panicked: action has expired") });
     const cfg = relayCfg({ port: 0 });
-    const service = new RelayService({ config: cfg, contractId: CONTRACT, relayerAccountId: RELAYER, executeTgas: 300, writer, log: recordingLog() });
+    const service = new RelayService({ config: cfg, contractId: CONTRACT, relayerAccountId: RELAYER, executeTgas: 300, writer, reader: mockIntentReader(), log: recordingLog() });
     server = createRelayServer({ service, config: cfg, log: recordingLog() });
     base = `http://127.0.0.1:${await listen(server, "127.0.0.1", 0)}`;
     const res = await post("/v1/execute", await signedEnvelope(await evmSigner(), VOTE));

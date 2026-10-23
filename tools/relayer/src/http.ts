@@ -16,6 +16,11 @@ export interface RelayHttpOptions {
  *                           -> 200 {txHash, result?} | 4xx/5xx {error}
  *   GET  /v1/health         -> {ok, contractId, relayerAccountId}
  *   GET  /v1/nonce-hint     ?wallet=<optional> -> {nonce}
+ *   POST /v1/intent         body {wallet, intent, nonce, expires, signature} (or the envelope with
+ *                           method "submit_intent") -> 200 {txHash, intentId} | 4xx/5xx {error}
+ *   POST /v1/intent/cancel  body {wallet, id, nonce, expires, signature} (or method "cancel_intent")
+ *                           -> 200 {txHash, result?} | 4xx/5xx {error}
+ *   GET  /v1/intent/:id     -> the get_intent view record, 404 {error} when absent
  */
 export function createRelayServer(opts: RelayHttpOptions): Server {
   const { service, config, log } = opts;
@@ -60,8 +65,27 @@ async function handle(req: IncomingMessage, res: ServerResponse, service: RelayS
       sendJson(res, 200, service.nonceHint(url.searchParams.get("wallet") ?? undefined, ip));
       return;
     }
-    default:
+    case "/v1/intent": {
+      if (req.method !== "POST") throw methodNotAllowed(res, "POST");
+      const raw = await readJsonBody(req, config.maxBodyBytes, res);
+      sendJson(res, 200, await service.submitIntent(raw, ip));
+      return;
+    }
+    case "/v1/intent/cancel": {
+      if (req.method !== "POST") throw methodNotAllowed(res, "POST");
+      const raw = await readJsonBody(req, config.maxBodyBytes, res);
+      sendJson(res, 200, await service.cancelIntent(raw, ip));
+      return;
+    }
+    default: {
+      const intent = /^\/v1\/intent\/([^/]+)$/.exec(url.pathname);
+      if (intent) {
+        if (req.method !== "GET") throw methodNotAllowed(res, "GET");
+        sendJson(res, 200, await service.getIntent(intent[1] as string, ip));
+        return;
+      }
       sendJson(res, 404, { error: "not found" });
+    }
   }
 }
 

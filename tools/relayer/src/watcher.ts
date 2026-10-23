@@ -2,7 +2,10 @@ import type { EvmChainConfig, RelayerConfig } from "./config.js";
 import { isContractRejection } from "./near.js";
 import { planScanRange, scanRange } from "./deposits.js";
 import { freshState, loadState, saveState, type ChainState } from "./state.js";
-import type { AssetInfo, DepositCandidate, EvmReader, Logger, NearReader, NearWriter } from "./types.js";
+import type { AssetInfo, DepositCandidate, EvmReader, Hex, Logger, NearReader, NearWriter } from "./types.js";
+
+/** Intents of the depositor's owner read after each reported deposit (first page only). */
+const INTENT_PAGE = 50;
 
 export interface WatcherDeps {
   config: RelayerConfig;
@@ -11,6 +14,8 @@ export interface WatcherDeps {
   writer: NearWriter | null;
   log: Logger;
   shouldStop: () => boolean;
+  /** Last status logged per intent id, kept across passes by the caller. Logging only, no behaviour. */
+  intentStatus?: Map<number, string>;
 }
 
 export interface DepositPassOptions {
@@ -160,6 +165,7 @@ async function reportOne(deps: WatcherDeps, dep: DepositCandidate, dryRun: boole
     const fresh = await deps.writer.reportEvmDeposit(args);
     if (fresh) {
       deps.log.info("reported deposit", { ...args });
+      await logIntentStatus(deps, dep.from);
       return "reported";
     }
     deps.log.info("deposit already reported", { tx_hash: dep.txHash, log_index: dep.logIndex });
@@ -174,3 +180,23 @@ async function reportOne(deps: WatcherDeps, dep: DepositCandidate, dryRun: boole
   }
 }
 
+/**
+ * After a deposit is reported, the contract may have executed an open intent of the depositor's owner.
+ * Reads the owner's intents and logs each status change. Read-only: a failure is logged and ignored.
+ */
+async function logIntentStatus(deps: WatcherDeps, depositor: Hex): Promise<void> {
+  const seen = deps.intentStatus ?? new Map<number, string>();
+  try {
+    const owner = await deps.near.resolveWallet(`evm:${depositor.toLowerCase()}`);
+    const intents = await deps.near.getIntentsOfOwner(owner, 0, INTENT_PAGE);
+    for (const intent of intents) {
+      const status = intent.status ?? "unknown";
+      const previous = seen.get(intent.id);
+      if (previous === status) continue;
+      seen.set(intent.id, status);
+      deps.log.info("intent status", { intent_id: intent.id, status, previous: previous ?? null, owner });
+    }
+  } catch (err) {
+    deps.log.warn("could not read intents after deposit", { depositor, error: String(err) });
+  }
+}

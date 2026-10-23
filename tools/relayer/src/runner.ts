@@ -13,6 +13,8 @@ export interface RunnerDeps {
   dryRun: boolean;
   log: Logger;
   shouldStop: () => boolean;
+  /** Last logged status per intent id; pass the same map across loop passes. */
+  intentStatus?: Map<number, string>;
 }
 
 export interface PassOptions {
@@ -47,7 +49,7 @@ export async function runOnce(deps: RunnerDeps, opts: PassOptions = {}): Promise
     }
     try {
       const stats = await runDepositPass(
-        { config, near: deps.near, writer: deps.writer, log, shouldStop: deps.shouldStop },
+        { config, near: deps.near, writer: deps.writer, log, shouldStop: deps.shouldStop, intentStatus: deps.intentStatus },
         chain,
         reader,
         { dryRun: deps.dryRun, fromBlock: opts.fromBlock, toBlock: opts.toBlock },

@@ -6,6 +6,7 @@ import type {
   EvmChainInfo,
   EvmReader,
   Hex,
+  IntentRecord,
   Logger,
   NearReader,
   NearWriter,
@@ -59,7 +60,7 @@ export function relayerCfg(stateDir: string, chain: EvmChainConfig, fallbackAsse
       contractId: "windswapv4-btb.testnet",
       relayerAccountId: "relayer.testnet",
       credentialsPath: "/unused",
-      gasTgas: { report: 50, process: 200, mark: 30, execute: 300 },
+      gasTgas: { report: 50, process: 200, mark: 30, execute: 300, submitIntent: 300, cancelIntent: 300 },
     },
     evm: [chain],
     pollIntervalMs: 1,
@@ -190,7 +191,14 @@ export interface MockNear extends NearReader {
   pending: WithdrawalRecord[];
   signed: WithdrawalRecord[];
   statuses: Record<number, WithdrawalRecord["status"]>;
+  /** Intents returned by get_intents_of_owner for any owner. */
+  intents: IntentRecord[];
+  /** Owner id per wallet id (`evm:0x...`); unknown wallets resolve to OWNER_HEX. */
+  owners: Record<string, string>;
+  resolvedWallets: string[];
 }
+
+export const OWNER_HEX = "cd".repeat(32);
 
 export function mockNear(overrides: Partial<MockNear> = {}): MockNear {
   const near: MockNear = {
@@ -199,6 +207,9 @@ export function mockNear(overrides: Partial<MockNear> = {}): MockNear {
     pending: [],
     signed: [],
     statuses: {},
+    intents: [],
+    owners: {},
+    resolvedWallets: [],
     ...overrides,
     async getEvmAssets() {
       if (near.assets instanceof Error) throw near.assets;
@@ -218,6 +229,16 @@ export function mockNear(overrides: Partial<MockNear> = {}): MockNear {
       const found = [...near.pending, ...near.signed].find((w) => w.id === id);
       if (!found) return null;
       return { ...found, status: near.statuses[id] ?? found.status };
+    },
+    async resolveWallet(wallet) {
+      near.resolvedWallets.push(wallet);
+      return near.owners[wallet] ?? OWNER_HEX;
+    },
+    async getIntent(id) {
+      return near.intents.find((i) => i.id === id) ?? null;
+    },
+    async getIntentsOfOwner() {
+      return near.intents;
     },
   };
   return near;
@@ -255,6 +276,12 @@ export function mockWriter(opts: {
     },
     async executeAction() {
       throw new Error("executeAction is not used by the watcher tests");
+    },
+    async submitIntent() {
+      throw new Error("submitIntent is not used by the watcher tests");
+    },
+    async cancelIntent() {
+      throw new Error("cancelIntent is not used by the watcher tests");
     },
   };
   return w;
