@@ -1649,6 +1649,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "near-contract-standards"
+version = "5.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "66b20cc8f3dd3696dff11ee70e168b2bf957b6e9d1d0730c9b80c1c66cdc3a3b"
+dependencies = [
+ "near-sdk",
+]
+
+[[package]]
 name = "near-crypto"
 version = "0.35.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4001,6 +4010,14 @@ version = "0.1.0"
 dependencies = [
  "near-sdk",
  "windswap-engine",
+]
+
+[[package]]
+name = "windswap-test-token"
+version = "0.1.0"
+dependencies = [
+ "near-contract-standards",
+ "near-sdk",
 ]
 
 [[package]]
