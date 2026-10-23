@@ -95,6 +95,48 @@ pub enum MathError {
     SafeCastUnderflow,
     /// `Reward`: caller is not the authorized voter, or not approved or owner of the veNFT (`NotAuthorized`).
     NotAuthorized,
+    /// `VotingEscrow`: the token is not a normal veNFT (`NotNormalNFT`).
+    NotNormalNft,
+    /// `VotingEscrow`: the token is neither managed nor normal (`NotManagedOrNormalNFT`).
+    NotManagedOrNormalNft,
+    /// `VotingEscrow`: the token is not a managed veNFT (`NotManagedNFT`).
+    NotManagedNft,
+    /// `VotingEscrow.withdrawManaged`: the token is not locked into a managed veNFT (`NotLockedNFT`).
+    NotLockedNft,
+    /// `VotingEscrow.withdrawManaged`: the token has no managed veNFT (`InvalidManagedNFTId`).
+    InvalidManagedNftId,
+    /// `VotingEscrow.createManagedLockFor`: caller is neither the allowed manager nor the governor.
+    NotGovernorOrManager,
+    /// `VotingEscrow.setManagedState`: caller is neither the emergency council nor the governor.
+    NotEmergencyCouncilOrGovernor,
+    /// `VotingEscrow.setAllowedManager`: caller is not the governor (`NotGovernor`).
+    NotGovernor,
+    /// `VotingEscrow`: the new value equals the current one (`SameAddress`).
+    SameAddress,
+    /// `VotingEscrow.setAllowedManager`: the zero address (`ZeroAddress`).
+    ZeroAddress,
+    /// `VotingEscrow.setManagedState`: the state is already set (`SameState`).
+    SameState,
+    /// `VotingEscrow.depositManaged`: the token has no voting balance (`ZeroBalance`).
+    ZeroBalance,
+    /// `VotingEscrow.depositFor`: a managed veNFT is only fed by the distributor (`NotDistributor`).
+    NotDistributor,
+    /// `VotingEscrow.delegate`: the delegatee does not exist (`NonExistentToken`).
+    NonExistentToken,
+    /// `VotingEscrow.delegateBySig`: `s` is in the upper half of the curve order (`InvalidSignatureS`).
+    InvalidSignatureS,
+    /// `VotingEscrow.delegateBySig`: the signature does not recover to an address (`InvalidSignature`).
+    InvalidSignature,
+    /// `VotingEscrow.delegateBySig`: the nonce is not the signer's next nonce (`InvalidNonce`).
+    InvalidNonce,
+    /// `VotingEscrow.delegateBySig`: `block.timestamp > expiry` (`SignatureExpired`).
+    SignatureExpired,
+    /// `LockedManagedReward`: caller is not the escrow (`NotVotingEscrow`).
+    NotVotingEscrow,
+    /// `LockedManagedReward.getReward`: not exactly one token (`NotSingleToken`).
+    NotSingleToken,
+    /// `LockedManagedReward`: token is not the escrow token (`NotEscrowToken`).
+    NotEscrowToken,
     /// `FeesVotingReward.notifyRewardAmount`: sender is not the gauge mapped to this contract (`NotGauge`).
     NotGauge,
     /// `FeesVotingReward.notifyRewardAmount`: token is not a reward of this contract (`InvalidReward`).

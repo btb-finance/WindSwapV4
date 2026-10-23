@@ -94,7 +94,7 @@ pub struct Reward {
 
 /// `getPriorBalanceIndex` / `getPriorSupplyIndex`: index of the last checkpoint at or before
 /// `timestamp` among `n` checkpoints sorted by timestamp, `0` when none is at or before it.
-fn prior_index(n: usize, ts_at: impl Fn(usize) -> u64, timestamp: u64) -> usize {
+pub(crate) fn prior_index(n: usize, ts_at: impl Fn(usize) -> u64, timestamp: u64) -> usize {
     if n == 0 {
         return 0;
     }
@@ -355,6 +355,17 @@ impl Reward {
         if !sender_is_approved_or_owner && !sender_is_voter {
             return Err(MathError::NotAuthorized);
         }
+        self.claim(token_id, tokens, now)
+    }
+
+    /// `_getReward(recipient, tokenId, tokens)` without the caller check. The managed reward contracts
+    /// call it after their own authorization, and `get_reward` calls it after the voting check.
+    pub(crate) fn claim(
+        &mut self,
+        token_id: u64,
+        tokens: &[RewardToken],
+        now: u64,
+    ) -> Result<Vec<(RewardToken, U256)>> {
         // `_getReward` processes the tokens in order, and each one writes `lastEarn` before the next
         // is read. The writes are collected and applied at the end, so an `Err` changes nothing.
         let mut claims = Vec::with_capacity(tokens.len());
@@ -419,7 +430,7 @@ impl Reward {
 
     /// `_notifyRewardAmount`: adds `amount` to `tokenRewardsPerEpoch[token][epochStart(now)]`.
     /// The caller has already pulled the tokens.
-    fn add_epoch_reward(&mut self, token: &str, amount: U256, now: u64) -> Result<()> {
+    pub(crate) fn add_epoch_reward(&mut self, token: &str, amount: U256, now: u64) -> Result<()> {
         let total = self.epoch_total_after(token, amount, now)?;
         self.token_rewards_per_epoch
             .insert((token.to_owned(), epoch_start(now)), total);

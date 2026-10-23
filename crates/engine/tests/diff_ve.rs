@@ -143,7 +143,9 @@ fn apply(ve: &mut VotingEscrow, op: &str, now: u64, block: u64, a: &[&str]) -> R
             let (id, pulled) = ve.create_lock_for(acct(n(a[1])), now, block, u(a[2]), n(a[3]))?;
             format!("{id}:{pulled}")
         }
-        "depositFor" => ve.deposit_for(now, block, n(a[1]), u(a[2]))?.to_string(),
+        "depositFor" => ve
+            .deposit_for(caller(), now, block, n(a[1]), u(a[2]))?
+            .to_string(),
         "increaseAmount" => ve
             .increase_amount(caller(), now, block, n(a[1]), u(a[2]))?
             .to_string(),
@@ -173,7 +175,7 @@ fn apply(ve: &mut VotingEscrow, op: &str, now: u64, block: u64, a: &[&str]) -> R
             String::new()
         }
         "transferFrom" => {
-            ve.transfer_from(caller(), block, acct(n(a[1])), acct(n(a[2])), n(a[3]))?;
+            ve.transfer_from(caller(), now, block, acct(n(a[1])), acct(n(a[2])), n(a[3]))?;
             String::new()
         }
         "voting" => {

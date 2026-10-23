@@ -13,6 +13,7 @@ pub mod math;
 pub mod minter;
 pub mod pool;
 pub mod rewards;
+pub mod rewards_managed;
 pub mod router;
 pub mod ve;
 
