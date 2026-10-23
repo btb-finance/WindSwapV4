@@ -1,0 +1,54 @@
+├  Unsigned transaction:
+│    signer_id:    windswapv4-btb.testnet
+│    receiver_id:  windswapv4-btb.testnet
+│    actions:
+│       -- function call:      
+│                       method name:  request_evm_payout
+│                       args:         {
+│                                       "chain_id": 84532,
+│                                       "gas_limit": 21000,
+│                                       "max_fee_per_gas": "2000000000",
+│                                       "max_priority_fee_per_gas": "1000000000",
+│                                       "nonce": 0,
+│                                       "path": "ethereum-1",
+│                                       "to": "0x000000000000000000000000000000000000dEaD",
+│                                       "value_wei": "1000000000000"
+│                                     }
+│                       gas:          300.0 Tgas
+│                       deposit:      1 yoctoNEAR
+│     [0m
+├  Your transaction was signed successfully.
+│    Public key: ed25519:HRkmRp9Sr2U4mRTYaLcpLhfigJCdQfk9uPTcRNQFoEqt
+│    Signature:  ed25519:5cdtVMSky6AWr6282hwovg8RVCpDCS6cRBJUjNzFkn7wNb4UWx21f6DSuoPBSUd2f7GsS69VVQdJC1uqjf88rRb2
+│     [0m
+├  Transaction Execution Info:
+│    Gas burned: 0.309 Tgas
+│    Transaction fee: 0.0000308580472622 NEAR
+│    Transaction ID: B7JtSCmSCKgKuJC711qTbc4J1iBi9PTdAKVTMUKrRk5p
+│    To see the transaction in the transaction explorer, please open this url in your browser:
+│    https://explorer.testnet.near.org/transactions/B7JtSCmSCKgKuJC711qTbc4J1iBi9PTdAKVTMUKrRk5p
+│     [0m
+├  Function execution logs:
+│    Logs [windswapv4-btb.testnet]:   No logs
+│    Logs [v1.signer-prod.testnet]:
+│      sign: predecessor=AccountId("windswapv4-btb.testnet"), request=SignRequestArgs { path: "ethereum-1", payload: Ecdsa(BoundedVec { inner: [202, 30, 161, 60, 27, 144, 123, 249, 28, 238, 85, 244, 91, 115, 43, 145, 66, 114, 19, 129, 217, 22, 232, 235, 74, 189, 138, 37, 173, 246, 156, 110], witness: NonEmpty(()) }), domain_id: DomainId(0) }
+│    Logs [v1.signer-prod.testnet]:   No logs
+│    Logs [windswapv4-btb.testnet]:   No logs
+│    Logs [windswapv4-btb.testnet]:   No logs
+│    Logs [windswapv4-btb.testnet]:   No logs
+│    Logs [windswapv4-btb.testnet]:   No logs
+│    Logs [windswapv4-btb.testnet]:   No logs
+│     [0m
+
+Function execution return value (printed to stdout):
+"0x02f87283014a3480843b9aca00847735940082520894000000000000000000000000000000000000dead85e8d4a5100080c001a01106bcfc9f62c6aef1d28f75634262ffa92f6152adfd4d63348f9588530dce14a0068fea89dfd9a55efe56fcf93cd4a811b468e9439a3389fed6afa9c9ed4ae12c"
+
+
+The "request_evm_payout" call to <windswapv4-btb.testnet> on behalf of <windswapv4-btb.testnet> succeeded.
+
+
+
+
+Here is your console command if you need to script it or re-run:
+    [33mnear contract call-function as-transaction windswapv4-btb.testnet request_evm_payout json-args '{"chain_id":84532,"nonce":0,"to":"0x000000000000000000000000000000000000dEaD","value_wei":"1000000000000","max_fee_per_gas":"2000000000","max_priority_fee_per_gas":"1000000000","gas_limit":21000,"path":"ethereum-1"}' prepaid-gas '300.0 Tgas' attached-deposit '1 yoctoNEAR' sign-as windswapv4-btb.testnet network-config testnet sign-with-legacy-keychain send[39m
+

@@ -1,0 +1,21 @@
+[package]
+name = "wind-token"
+description = "WIND governance token: NEP-141 on NEAR, 18 decimals, mintable only by the Wind Swap v4 contract. No pause, blacklist or freeze."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+# near-sdk 5.27 needs rustc 1.86, newer than the workspace's 1.85 floor.
+rust-version = "1.86"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+near-sdk = { workspace = true }
+near-contract-standards = { workspace = true }
+
+[dev-dependencies]
+# Host builds of near-sdk need `unit-testing`; it is only enabled for `cargo test`.
+near-sdk = { workspace = true, features = ["unit-testing"] }

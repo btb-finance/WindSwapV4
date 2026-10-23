@@ -238,3 +238,111 @@ Files:
 - `tools/chainsig-probe/txcost.mjs`: receipt tree cost
 - `tools/chainsig-probe/chainlatency.mjs`: on-chain latency
 - `tools/chainsig-probe/out/`: raw CLI output, derived keys, verification and cost results
+
+---
+
+## 8. Contract-initiated signing
+
+The contract (`crates/near-contract`) now calls the MPC `sign` itself. `request_evm_payout` builds an EIP-1559 transfer, sends its signing hash to the MPC, and an `on_evm_signed` callback returns the signed raw transaction. The code is in `crates/near-contract/src/evm.rs` (pure encoding) and `lib.rs` (the calls). This was not run on testnet by the author. The reviewer runs the steps below.
+
+### API
+
+| Method | Who | Notes |
+|---|---|---|
+| `request_evm_payout(chain_id, nonce, to, value_wei, max_fee_per_gas, max_priority_fee_per_gas, gas_limit, path)` | owner | `#[payable]`. Attach exactly 1 yoctoNEAR (the same rule as `withdraw`). The `sign` call attaches its own 1 yocto from the contract balance. Attach at least 100 Tgas: 50 for `sign`, 20 for the callback. Returns a promise that resolves to the raw transaction. |
+| `on_evm_signed(tx, sig)` | contract only (`#[private]`) | Callback. Assembles `0x02 \|\| rlp([fields, y_parity, r, s])` and returns it as 0x-hex. Panics if the MPC call failed, the scheme is not `Secp256k1`, or the response is not a valid signature. |
+| `set_mpc_contract(account)` | owner | Changes the MPC contract. Default `v1.signer-prod.testnet`. |
+| `get_mpc_contract()` | anyone | View. |
+
+`request_evm_payout` checks the fields first (`to` is a 0x address, `chain_id` > 0, `gas_limit` >= 21000, `max_priority_fee_per_gas` <= `max_fee_per_gas`, `path` not empty). The MPC request is `{"request":{"path":..., "payload_v2":{"Ecdsa":"<64 hex, the signing hash>"}, "domain_id":0}}`.
+
+The sender address is not a contract view. Get it from the MPC contract: `derived_public_key({"path", "predecessor": "<contract account>", "domain_id": 0})`, then `keccak256(pubkey)[12..]`. `tools/chainsig-probe/payout-check.mjs` does this.
+
+### State and migration
+
+- New field `mpc_contract: AccountId`, appended last to `Contract`. Existing collections keep their prefixes.
+- `migrate()` now reads `ContractV1`: the deployed layout (owner, fee_config, pools, pool_tokens, next_pool_id, balances, allowed_tokens). It keeps everything and sets `mpc_contract` to the default. `ContractV0` is removed. The v2 deployment has this layout, so the migration matches what is on testnet. A contract that is not in this layout cannot run `migrate`.
+- A fresh deploy uses `new`, which sets the default MPC contract.
+
+### Encoding
+
+- RLP, EIP-1559 fields, and the signing hash `keccak256(0x02 || rlp([chain_id, nonce, max_priority_fee, max_fee, gas_limit, to, value, "", []]))` are written in `evm.rs`. There are no external crates in the wasm. Keccak comes from `env::keccak256_array`.
+- The MPC output is not normalised, so the callback sets `s` to low-s (`s = n - s`, `y_parity ^= 1` when `s > n/2`). `y_parity` is the MPC `recovery_id`. The `big_r` prefix byte is not used for parity (in probe data `recovery_id` 1 came with a `02` prefix, and the probe still recovered the key).
+- Tests (`cargo test -q -p windswap-near`, 81 tests):
+  - RLP against the spec examples and long-form headers.
+  - Signing hash and signed encoding against `alloy-consensus` 0.9 (dev-dependency): 5 transfer shapes, including zero values and `u64::MAX` nonces.
+  - Full payout in host tests: the request builds the digest and sends it in the `sign` call (checked from the mock receipts); the test plays the MPC node with a k256 signer, calls the callback, decodes the result with alloy, and recovers the signer. High-s and low-s responses give the same transaction.
+  - Owner-only, 1-yocto, prepaid-gas and field-validation panics, and the migration from `ContractV1`.
+- Cross-check with the Node script: a raw transaction produced by the Rust test (test key `0x42..42`, address `0x17c5185167401ed00cf5f5b2fc97d9bbfdb7d025`) passes `payout-check.mjs --address ... --raw ...`. The Node decoder and signer are independent of the Rust code.
+
+### Build
+
+```bash
+cd /Users/abc/WindSwapV4/crates/near-contract
+RUSTUP_TOOLCHAIN=1.86.0 cargo near build non-reproducible-wasm --no-abi
+# -> target/near/windswap_near/windswap_near.wasm, 480,036 bytes (v2 was 448.6 KB)
+```
+
+### Steps for the reviewer (owner `windswapv4-btb.testnet`)
+
+Account `ACC` is `windswapv4-btb.testnet`, the contract and the owner. Run from the repo root.
+
+1. Redeploy with the migration as the init call. The `new` init cannot run again on existing state.
+
+   ```bash
+   ACC=windswapv4-btb.testnet
+   near contract deploy $ACC use-file target/near/windswap_near/windswap_near.wasm \
+     with-init-call migrate json-args '{}' \
+     prepaid-gas '100.0 Tgas' attached-deposit '0 NEAR' \
+     network-config testnet sign-with-legacy-keychain send
+   ```
+
+   Check after deploy: `near contract call-function as-read-only $ACC get_mpc_contract json-args '{}' network-config testnet now` returns `"v1.signer-prod.testnet"`. `get_tokens` and `get_pool` should match the values before the deploy.
+
+2. Get the payout address for path `ethereum-1` and fund it with Sepolia ETH (chain 11155111). The payout needs the value plus gas. Nothing else funds it.
+
+   ```bash
+   node tools/chainsig-probe/payout-check.mjs --contract windswapv4-btb.testnet --path ethereum-1
+   ```
+
+   Take the `evm_address` from the output. Then fund it with a Sepolia faucet (any faucet is fine).
+
+3. Get the account nonce on Sepolia, then request the payout. Replace `RECIPIENT` and `NONCE`. The recipient is any EVM address.
+
+   ```bash
+   NONCE=0                       # eth_getTransactionCount of the derived address (latest)
+   RECIPIENT=0x0000000000000000000000000000000000000001   # replace with a real address
+   near contract call-function as-transaction windswapv4-btb.testnet request_evm_payout \
+     json-args "{\"chain_id\":11155111,\"nonce\":$NONCE,\"to\":\"$RECIPIENT\",\"value_wei\":\"1000000000000000\",\"max_fee_per_gas\":\"30000000000\",\"max_priority_fee_per_gas\":\"2000000000\",\"gas_limit\":21000,\"path\":\"ethereum-1\"}" \
+     prepaid-gas '100.0 Tgas' attached-deposit '1 yoctoNEAR' \
+     sign-as windswapv4-btb.testnet network-config testnet sign-with-legacy-keychain send \
+     2>&1 | sed 's/\x1b\[[0-9;]*m//g' | tee tools/chainsig-probe/out/payout_sepolia_1.txt
+   ```
+
+   What to expect:
+   - The transaction succeeds. Its receipts include a `sign` call to `v1.signer-prod.testnet` (1 yocto) and an `on_evm_signed` callback on `windswapv4-btb.testnet`.
+   - The CLI prints `Function execution return value (printed to stdout):` followed by a JSON string starting with `"0x02f8`. That string is the signed raw transaction.
+   - Latency is about 4 to 5 s on-chain for the MPC round trip (probe numbers), plus the CLI wait.
+   - Gas burnt is about 8.6 Tgas for the MPC part (probe numbers). The callback was not measured.
+   - Errors: `only owner` (wrong signer), `Requires attached deposit of exactly 1 yoctoNEAR`, `attach at least 100 Tgas of prepaid gas`, `MPC sign failed` (the MPC call failed or timed out).
+
+4. Verify the returned transaction offline (no broadcast):
+
+   ```bash
+   node tools/chainsig-probe/payout-check.mjs --contract windswapv4-btb.testnet --path ethereum-1 \
+     --file tools/chainsig-probe/out/payout_sepolia_1.txt
+   ```
+
+   Expected: `PASS` for y_parity, r range, low-s, and `recovered signer address equals expected address`, then exit code 0. The script also prints the decoded fields and the signing hash. The fields must match the call: chain 11155111, the nonce, the recipient and the value.
+
+   The checker itself has an offline self-test (`node tools/chainsig-probe/payout-check.mjs --self-test`).
+
+5. Optional: broadcast the raw transaction to Sepolia with any RPC (`eth_sendRawTransaction`), then check the derived address received the value. This is not needed for the verification in step 4.
+
+### Not verified
+
+- The contract has not been deployed or called on testnet by the author (per the task rules). Nothing here is measured on testnet.
+- The yield timeout for `sign` is still unknown (see section 5). If the MPC does not answer, the callback sees a failed promise and the call panics. Nothing is retried or stored.
+- No nonce tracking. The owner supplies `nonce`. Two requests with the same nonce both produce valid signatures, and only one can be mined.
+- The signed transaction is returned to the caller only. It is not stored on chain.
+- The derived address is not funded by the contract.

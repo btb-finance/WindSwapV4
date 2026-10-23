@@ -13,7 +13,9 @@ pub mod gauge;
 pub mod math;
 pub mod minter;
 pub mod pool;
+pub mod rewards;
 pub mod router;
+pub mod ve;
 
 pub use alloy_primitives::{I256, U256};
 pub use error::MathError;
