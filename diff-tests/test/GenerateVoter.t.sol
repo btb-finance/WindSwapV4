@@ -44,7 +44,7 @@ interface Vm {
 contract GenerateVoterVectors {
     Vm constant vm = Vm(address(uint160(uint256(keccak256("hevm cheat code")))));
 
-    uint256 constant OPS = 2000;
+    uint256 constant OPS = 4000;
     uint256 constant T0 = 1_780_000_000;
     uint256 constant B0 = 1_000;
     uint256 constant WEEK = 1 weeks;
@@ -83,6 +83,7 @@ contract GenerateVoterVectors {
     address[7] poolAddr; // index 1..6
     address[GAUGE_CAP + 1] gaugeAddr; // index 1..nGauges
     uint256[NLOCKS + 1] tokOwner; // user role of each token id (0 when not minted)
+    uint256[GAUGE_CAP + 1] gaugePid; // pool id of each gauge
 
     function rand() internal returns (uint256) {
         seed = uint256(keccak256(abi.encode(seed)));
@@ -199,6 +200,11 @@ contract GenerateVoterVectors {
         if (sel == IReward.NotWhitelisted.selector) return "NotWhitelisted";
         if (sel == IReward.ZeroAmount.selector) return "ZeroAmount";
         if (sel == IReward.NotAuthorized.selector) return "NotAuthorized";
+        if (sel == IReward.NotGauge.selector) return "NotGauge";
+        if (sel == IReward.InvalidReward.selector) return "InvalidReward";
+        if (sel == IVotingEscrow.LockExpired.selector) return "LockExpired";
+        if (sel == IVotingEscrow.PermanentLock.selector) return "PermanentLock";
+        if (sel == IVotingEscrow.NoLockFound.selector) return "NoLockFound";
         if (sel == IVotingEscrow.LockDurationTooLong.selector) return "LockDurationTooLong";
         if (sel == IVotingEscrow.LockDurationNotInFuture.selector) return "LockDurationNotInFuture";
         if (sel == bytes4(0x4e487b71)) {
@@ -313,20 +319,25 @@ contract GenerateVoterVectors {
         blk += 1;
         vm.roll(blk);
         uint256 pick = rand() % 100;
-        if (pick < 8 && nLocks < NLOCKS) doLock(f);
-        else if (pick < 30) doVote(f);
-        else if (pick < 36) doReset(f);
-        else if (pick < 42) doPoke(f);
-        else if (pick < 48) doCreateGauge(f);
-        else if (pick < 56) doNotify(f);
-        else if (pick < 62) doBribeNotify(f);
-        else if (pick < 70) doDistribute(f);
-        else if (pick < 75) doUpdateFor(f);
-        else if (pick < 78) doKill(f);
-        else if (pick < 81) doWhitelistToken(f);
-        else if (pick < 84) doWhitelistNft(f);
-        else if (pick < 85) doMaxVoting(f);
-        else if (pick < 93) doClaim(f);
+        if (pick < 6) {
+            if (nLocks < NLOCKS) doLock(f);
+            else doVote(f);
+        } else if (pick < 29) doVote(f);
+        else if (pick < 33) doReset(f);
+        else if (pick < 37) doPoke(f);
+        else if (pick < 40) doCreateGauge(f);
+        else if (pick < 46) doNotify(f);
+        else if (pick < 52) doBribeNotify(f);
+        else if (pick < 62) doFeeNotify(f);
+        else if (pick < 68) doDistribute(f);
+        else if (pick < 71) doUpdateFor(f);
+        else if (pick < 73) doKill(f);
+        else if (pick < 75) doWhitelistToken(f);
+        else if (pick < 76) doWhitelistNft(f);
+        else if (pick < 77) doMaxVoting(f);
+        else if (pick < 90) doClaim(f);
+        else if (pick < 91) doPermanent(f);
+        else if (pick < 95) doExtend(f);
         else doEarned(f);
     }
 
@@ -339,8 +350,8 @@ contract GenerateVoterVectors {
         uint256 dur;
         if (p2 < 3) dur = 0;
         else if (p2 < 6) dur = MAXTIME + 1 + rand() % 1e6;
-        else if (p2 < 20) dur = WEEK * (1 + rand() % 208) + rand() % WEEK;
-        else dur = WEEK * (104 + rand() % 100) + rand() % WEEK;
+        else if (p2 < 12) dur = WEEK * (1 + rand() % 52) + rand() % WEEK;
+        else dur = MAXTIME - rand() % WEEK; // near the maximum: keeps voting power alive
         string memory ins = string.concat("lock|", s(clock), "|", s(blk), "|", s(role), "|", s(value), "|", s(dur));
         wind.mint(addrOf(role), value);
         vm.prank(addrOf(role));
@@ -372,8 +383,10 @@ contract GenerateVoterVectors {
         uint256[] memory weights = new uint256[](np);
         string memory pidStr;
         string memory wStr;
+        uint256 vstart = rand() % NPOOLS;
         for (uint256 i = 0; i < np; i++) {
-            uint256 pid = 1 + rand() % NPOOLS;
+            // Mostly distinct pools (consecutive from a random start); sometimes random, so duplicates occur.
+            uint256 pid = rand() % 100 < 90 ? 1 + (vstart + i) % NPOOLS : 1 + rand() % NPOOLS;
             pools[i] = poolAddr[pid];
             uint256 wp = rand() % 100;
             uint256 w;
@@ -438,6 +451,7 @@ contract GenerateVoterVectors {
         try voter.createGauge(pf, poolAddr[pid]) returns (address g) {
             nGauges += 1;
             gaugeAddr[nGauges] = g;
+            gaugePid[nGauges] = pid;
             logOk(f, ins, s(nGauges));
         } catch (bytes memory r) {
             logErr(f, ins, r);
@@ -501,13 +515,13 @@ contract GenerateVoterVectors {
         }
         uint256 kind = rand() % 3;
         if (nGauges == 0) kind = 0;
-        uint256 before = wind.balanceOf(address(minterMock));
+        uint256 before = gaugeWind();
         if (kind == 0) {
             uint256 start = rand() % (voter.length() + 2);
             uint256 finish = start + rand() % 3;
             string memory ins = string.concat("distr|", s(clock), "|", s(blk), "|r|", s(start), "|", s(finish));
             try voter.distribute(start, finish) {
-                logOk(f, ins, s(wind.balanceOf(address(minterMock)) - before));
+                logOk(f, ins, s(gaugeWind() - before));
             } catch (bytes memory r) {
                 logErr(f, ins, r);
             }
@@ -522,7 +536,7 @@ contract GenerateVoterVectors {
             }
             string memory ins = string.concat("distl|", s(clock), "|", s(blk), "|", ids);
             try voter.distribute(gs) {
-                logOk(f, ins, s(wind.balanceOf(address(minterMock)) - before));
+                logOk(f, ins, s(gaugeWind() - before));
             } catch (bytes memory r) {
                 logErr(f, ins, r);
             }
@@ -530,10 +544,81 @@ contract GenerateVoterVectors {
             uint256 g = 1 + rand() % nGauges;
             string memory ins = string.concat("distg|", s(clock), "|", s(blk), "|", s(g));
             try voter.distributeForGauge(gaugeAddr[g]) {
-                logOk(f, ins, s(wind.balanceOf(address(minterMock)) - before));
+                logOk(f, ins, s(gaugeWind() - before));
             } catch (bytes memory r) {
                 logErr(f, ins, r);
             }
+        }
+    }
+
+    /// Total WIND held by the gauges: what `_distribute` transfers in (the distribute payload).
+    function gaugeWind() internal view returns (uint256 total) {
+        for (uint256 g = 1; g <= nGauges; g++) {
+            total += wind.balanceOf(gaugeAddr[g]);
+        }
+    }
+
+    /// Fee notification: as the gauge (its `notifyFees`, after minting the token to it) or as a stranger (which
+    /// reverts with `NotGauge`). Tokens are the gauge's pool tokens half the time, else any token (`InvalidReward`).
+    function doFeeNotify(string memory f) internal {
+        if (nGauges == 0) return;
+        uint256 g = 1 + rand() % nGauges;
+        uint256 j;
+        uint256 pid = gaugePid[g];
+        if (rand() % 2 == 0 && pid >= 1 && pid <= 4) j = rand() % 2 == 0 ? pid - 1 : pid;
+        else j = rand() % NTOK;
+        uint256 amount = rand() % 100 < 5 ? 0 : rand() % 1e20;
+        bool viaGauge = rand() % 100 < 85;
+        address fees = voter.gaugeToFees(gaugeAddr[g]);
+        string memory ins = string.concat(
+            "fnotify|", s(clock), "|", s(blk), "|", s(g), "|", tname(j), "|", s(amount), "|", viaGauge ? "1" : "0"
+        );
+        if (viaGauge) {
+            tokens[j].mint(gaugeAddr[g], amount);
+            try VoterMockGauge(gaugeAddr[g]).notifyFees(address(tokens[j]), amount) {
+                logOk(f, ins, "-");
+            } catch (bytes memory r) {
+                logErr(f, ins, r);
+            }
+        } else {
+            vm.prank(addrOf(STRANGER_ROLE));
+            try IReward(fees).notifyRewardAmount(address(tokens[j]), amount) {
+                logOk(f, ins, "-");
+            } catch (bytes memory r) {
+                logErr(f, ins, r);
+            }
+        }
+    }
+
+    /// `lockPermanent` by the owner (or a stranger, which reverts with `NotApprovedOrOwner`).
+    function doPermanent(string memory f) internal {
+        if (nLocks == 0) return;
+        uint256 t = 1 + rand() % nLocks;
+        uint256 who = rand() % 100 < 90 ? 0x1000 + tokOwner[t] : STRANGER_ROLE;
+        string memory ins = string.concat("perm|", s(clock), "|", s(blk), "|", s(t), "|", s(who));
+        vm.prank(addrOf(who));
+        try ve.lockPermanent(t) {
+            logOk(f, ins, "-");
+        } catch (bytes memory r) {
+            logErr(f, ins, r);
+        }
+    }
+
+    /// `increaseUnlockTime` to the maximum lock (keeps voting power alive), or a short duration that is not in
+    /// the future (reverts with `LockDurationNotInFuture`).
+    function doExtend(string memory f) internal {
+        if (nLocks == 0) return;
+        uint256 t = 1 + rand() % nLocks;
+        uint256 who = rand() % 100 < 90 ? 0x1000 + tokOwner[t] : STRANGER_ROLE;
+        uint256 dur = rand() % 100 < 90 ? MAXTIME - rand() % WEEK : WEEK * (1 + rand() % 8);
+        string memory ins = string.concat(
+            "extend|", s(clock), "|", s(blk), "|", s(t), "|", s(who), "|", s(dur)
+        );
+        vm.prank(addrOf(who));
+        try ve.increaseUnlockTime(t, dur) {
+            logOk(f, ins, "-");
+        } catch (bytes memory r) {
+            logErr(f, ins, r);
         }
     }
 
@@ -660,12 +745,14 @@ contract GenerateVoterVectors {
         address[][] memory tks = new address[][](ne);
         string memory entries;
         for (uint256 e = 0; e < ne; e++) {
-            uint256 g = 1 + rand() % nGauges;
-            uint256 nt = rand() % 4;
+            uint256 g = pickClaimGauge(t);
+            uint256 pid = gaugePid[g];
+            uint256 nt = 1 + rand() % 3;
             address[] memory tl = new address[](nt);
             string memory names;
             for (uint256 i = 0; i < nt; i++) {
-                uint256 j = rand() % NTOK;
+                // Mostly the gauge's own pool tokens, which are the reward tokens of its fees and bribe contracts.
+                uint256 j = rand() % 100 < 70 && pid >= 1 && pid <= 4 ? (rand() % 2 == 0 ? pid - 1 : pid) : rand() % NTOK;
                 tl[i] = tokenOf(j);
                 names = string.concat(names, i == 0 ? "" : ",", tname(j));
             }
@@ -695,6 +782,18 @@ contract GenerateVoterVectors {
                 logErr(f, ins, r);
             }
         }
+    }
+
+    /// A gauge the token currently votes for (most of the time), else any gauge.
+    function pickClaimGauge(uint256 t) internal returns (uint256) {
+        uint256[NPOOLS] memory cands;
+        uint256 n;
+        for (uint256 p = 1; p <= NPOOLS; p++) {
+            uint256 g = gid(voter.gauges(poolAddr[p]));
+            if (g != 0 && voter.votes(t, poolAddr[p]) > 0) cands[n++] = g;
+        }
+        if (n > 0 && rand() % 100 < 80) return cands[rand() % n];
+        return 1 + rand() % nGauges;
     }
 
     function payoutStr(address owner_, uint256[NTOK] memory before) internal view returns (string memory out) {
