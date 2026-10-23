@@ -20,9 +20,14 @@ const SECP256K1_N_HEX: &str = "fffffffffffffffffffffffffffffffebaaedce6af48a03bb
 const SECP256K1_HALF_N_HEX: &str =
     "7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0";
 
-/// A native-token transfer as an EIP-1559 (type 2) transaction with no calldata and an empty
-/// access list. All fields are already parsed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The 4-byte selector of `transfer(address,uint256)` (ERC-20). Checked against keccak in the
+/// tests.
+const ERC20_TRANSFER_SELECTOR: [u8; 4] = [0xa9, 0x05, 0x9c, 0xbb];
+
+/// An EIP-1559 (type 2) transaction with an empty access list. A native transfer has empty
+/// `data`; an ERC-20 transfer has `data = transfer(to, amount)` and `to` = the token contract.
+/// All fields are already parsed.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Eip1559Transfer {
     pub chain_id: u64,
     pub nonce: u64,
@@ -31,6 +36,19 @@ pub struct Eip1559Transfer {
     pub gas_limit: u64,
     pub to: [u8; 20],
     pub value: u128,
+    pub data: Vec<u8>,
+}
+
+/// Calldata of ERC-20 `transfer(to, amount)`: the selector, then `to` and `amount` as 32-byte
+/// big-endian words.
+pub fn erc20_transfer_data(to: &[u8; 20], amount: u128) -> Vec<u8> {
+    let mut data = Vec::with_capacity(4 + 32 + 32);
+    data.extend_from_slice(&ERC20_TRANSFER_SELECTOR);
+    data.extend_from_slice(&[0u8; 12]);
+    data.extend_from_slice(to);
+    data.extend_from_slice(&[0u8; 16]);
+    data.extend_from_slice(&amount.to_be_bytes());
+    data
 }
 
 impl Eip1559Transfer {
@@ -62,8 +80,7 @@ impl Eip1559Transfer {
             rlp_uint(u128::from(self.gas_limit)),
             rlp_bytes(&self.to),
             rlp_uint(self.value),
-            // data: empty for a plain transfer.
-            rlp_bytes(&[]),
+            rlp_bytes(&self.data),
             // access_list: empty.
             rlp_list(&[]),
         ]
@@ -263,6 +280,7 @@ mod tests {
             gas_limit: 21_000,
             to: [0x11; 20],
             value,
+            data: Vec::new(),
         }
     }
 
@@ -277,7 +295,7 @@ mod tests {
             to: TxKind::Call(Address::from(t.to)),
             value: U256::from(t.value),
             access_list: Default::default(),
-            input: Bytes::new(),
+            input: Bytes::from(t.data.clone()),
         }
     }
 
@@ -331,6 +349,8 @@ mod tests {
                 nonce: u64::MAX,
                 ..transfer(1, 0, 0)
             },
+            erc20_transfer(84532, 3, [0x33; 20], 1_500_000),
+            erc20_transfer(1, 0, [0x00; 20], 0),
         ];
         for t in cases {
             let expected: B256 = alloy_tx(&t).signature_hash();
@@ -353,6 +373,47 @@ mod tests {
                 assert_eq!(t.signed_raw(&r, &s, parity), envelope.encoded_2718());
             }
         }
+    }
+
+    /// An ERC-20 transfer of `amount` of token `token` to `to`, sent from the derived address.
+    fn erc20_transfer(chain_id: u64, nonce: u64, to: [u8; 20], amount: u128) -> Eip1559Transfer {
+        Eip1559Transfer {
+            gas_limit: 100_000,
+            to: [0xdd; 20],
+            data: erc20_transfer_data(&to, amount),
+            ..transfer(chain_id, nonce, 0)
+        }
+    }
+
+    #[test]
+    fn erc20_transfer_data_matches_the_abi() {
+        use alloy_primitives::keccak256;
+        let selector = keccak256(b"transfer(address,uint256)");
+        assert_eq!(ERC20_TRANSFER_SELECTOR, selector[..4]);
+
+        let to = [0xab; 20];
+        let data = erc20_transfer_data(&to, 0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10);
+        assert_eq!(data.len(), 68);
+        assert_eq!(&data[..4], &selector[..4]);
+        assert_eq!(&data[4..16], &[0u8; 12], "address word is left-padded");
+        assert_eq!(&data[16..36], &to);
+        assert_eq!(&data[36..52], &[0u8; 16], "amount word is left-padded");
+        assert_eq!(
+            &data[52..],
+            &0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10u128.to_be_bytes()
+        );
+
+        // alloy's own ABI encoder agrees with the hand-built bytes.
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&selector[..4]);
+        let mut address_word = [0u8; 32];
+        address_word[12..].copy_from_slice(&to);
+        expected.extend_from_slice(&address_word);
+        expected.extend_from_slice(
+            &alloy_primitives::U256::from(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10u128)
+                .to_be_bytes::<32>(),
+        );
+        assert_eq!(data, expected);
     }
 
     #[test]

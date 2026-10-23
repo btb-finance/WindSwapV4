@@ -1,6 +1,7 @@
 //! Unit tests run on the host with near-sdk's mocked blockchain.
 
 use super::*;
+use crate::accounts::owner_hex;
 use near_sdk::test_utils::VMContextBuilder;
 use near_sdk::{testing_env, PromiseResult};
 use windswap_engine::error::MathError;
@@ -464,26 +465,56 @@ fn withdraw_works_after_token_is_removed() {
     assert_eq!(balance(&c, ALICE, USDC), 0);
 }
 
-// ---- Upgrade from the deployed layout (ContractV3) ----
+// ---- Upgrade from the deployed layout (ContractV4) ----
 
 #[test]
-fn migrate_reads_deployed_state() {
+fn migrate_reads_deployed_v4_state() {
     set_ctx(OWNER, 1_000);
+    let bob_owner = owner_of_account(&acct(BOB));
+    let alice_owner = owner_of_account(&acct(ALICE));
     {
-        // Write the deployed (v3) layout, with the same storage prefixes as the testnet contract.
-        let mut balances = LookupMap::new(StorageKey::Balances);
-        balances.insert((acct(ALICE), USDC.to_string()), 42u128);
+        // Write the deployed (v4) layout, with the same storage prefixes as the testnet contract.
+        let mut legacy_balances = LookupMap::new(StorageKey::Balances);
+        legacy_balances.insert((acct(ALICE), USDC.to_string()), 42u128);
+        let mut balances = LookupMap::new(StorageKey::OwnerBalances);
+        balances.insert((bob_owner, USDC.to_string()), 7u128);
         let mut allowed_tokens = IterableSet::new(StorageKey::AllowedTokens);
         allowed_tokens.insert(acct(USDC));
-        let old = ContractV3 {
+        let mut pending_withdrawals = LookupMap::new(StorageKey::PendingWithdrawals);
+        pending_withdrawals.insert(
+            0u64,
+            PendingWithdrawal {
+                owner: alice_owner,
+                token: "base-sepolia:eth".to_string(),
+                amount: 5,
+                to_chain_id: 84532,
+                to_address: [0x22; 20],
+            },
+        );
+        pending_withdrawals.insert(
+            1u64,
+            PendingWithdrawal {
+                owner: bob_owner,
+                token: "base-sepolia:eth".to_string(),
+                amount: 9,
+                to_chain_id: 84532,
+                to_address: [0x33; 20],
+            },
+        );
+        let old = ContractV4 {
             owner: acct(OWNER),
             fee_config: FeeConfig::default(),
             pools: IterableMap::new(StorageKey::Pools),
             pool_tokens: LookupMap::new(StorageKey::PoolTokens),
             next_pool_id: 3,
+            legacy_balances,
             balances,
             allowed_tokens,
             mpc_contract: acct("mpc.example.testnet"),
+            links: LinkRegistry::new("links"),
+            action_nonces: LookupSet::new(StorageKey::ActionNonces),
+            pending_withdrawals,
+            next_withdrawal_id: 2,
         };
         env::state_write(&old);
     }
@@ -498,17 +529,34 @@ fn migrate_reads_deployed_state() {
         "mpc contract is kept"
     );
 
-    // The v3 balance is not visible under the new keys until it is migrated.
+    // Owner-keyed balances are kept as they are.
+    assert_eq!(balance(&c, BOB, USDC), 7);
+    // The v3-era balance is still under its legacy key until it is migrated.
     assert_eq!(balance(&c, ALICE, USDC), 0);
     assert_eq!(c.get_legacy_balance(acct(ALICE), USDC.into()).0, 42);
-
-    // Owner moves it; a second run is a no-op.
     set_ctx(OWNER, 1_000);
     assert_eq!(c.migrate_balances(vec![(acct(ALICE), USDC.into())]), 1);
     assert_eq!(balance(&c, ALICE, USDC), 42);
-    assert_eq!(c.get_legacy_balance(acct(ALICE), USDC.into()).0, 0);
     assert_eq!(c.migrate_balances(vec![(acct(ALICE), USDC.into())]), 0);
-    assert_eq!(balance(&c, ALICE, USDC), 42);
+
+    // Pending withdrawals are copied as Pending with the same ids and fields.
+    let first = c.get_withdrawal(0).expect("copied");
+    assert_eq!(first.status, "Pending");
+    assert_eq!(first.owner_hex, owner_hex(&alice_owner));
+    assert_eq!(first.token_id, "base-sepolia:eth");
+    assert_eq!(first.amount.0, 5);
+    assert_eq!(
+        first.to_address,
+        "0x2222222222222222222222222222222222222222"
+    );
+    assert_eq!(c.get_withdrawal(1).expect("copied").amount.0, 9);
+    assert!(c.get_withdrawal(2).is_none());
+    assert_eq!(c.get_pending_withdrawals(0, 10).len(), 2);
+
+    // The new state starts empty.
+    assert!(c.get_relayers().is_empty());
+    assert!(c.get_evm_assets().is_empty());
+    assert!(c.get_evm_chain(84532).is_none());
 
     // The migrated contract works: a whitelisted deposit is still credited.
     set_ctx(USDC, 1_000);
@@ -553,12 +601,12 @@ fn set_mpc_contract_rejects_non_owner() {
 // ---- Chain Signatures: request_evm_payout ----
 
 /// The contract account in tests. The callback is private to it.
-const SELF_ACCOUNT: &str = "windswapv4-btb.testnet";
+pub(crate) const SELF_ACCOUNT: &str = "windswapv4-btb.testnet";
 const PAYOUT_PATH: &str = "ethereum-1";
 const PAYOUT_TO: &str = "0x2222222222222222222222222222222222222222";
 
 /// A context for a call that makes a promise: given caller, deposit and prepaid gas.
-fn set_payout_ctx(predecessor: &str, deposit: u128, prepaid_tgas: u64) {
+pub(crate) fn set_payout_ctx(predecessor: &str, deposit: u128, prepaid_tgas: u64) {
     let mut builder = VMContextBuilder::new();
     builder
         .current_account_id(acct(SELF_ACCOUNT))
@@ -584,6 +632,7 @@ fn evm_tx() -> EvmTx {
         max_fee_per_gas: U128(30_000_000_000),
         max_priority_fee_per_gas: U128(2_000_000_000),
         gas_limit: 21_000,
+        data: String::new(),
     }
 }
 
@@ -704,7 +753,7 @@ fn request_evm_payout_sends_sign_call_with_signing_hash() {
 }
 
 /// Arguments, deposit and static gas of the `sign` function call created by the last call.
-fn sign_call_args() -> Option<(Vec<u8>, NearToken, near_sdk::Gas)> {
+pub(crate) fn sign_call_args() -> Option<(Vec<u8>, NearToken, near_sdk::Gas)> {
     use near_sdk::mock::MockAction;
     near_sdk::test_utils::get_created_receipts()
         .iter()
@@ -724,12 +773,12 @@ fn sign_call_args() -> Option<(Vec<u8>, NearToken, near_sdk::Gas)> {
 // ---- Chain Signatures: on_evm_signed ----
 
 /// A secp256k1 key for the tests, and its EVM address.
-struct TestKey {
-    sk: k256::ecdsa::SigningKey,
-    address: [u8; 20],
+pub(crate) struct TestKey {
+    pub(crate) sk: k256::ecdsa::SigningKey,
+    pub(crate) address: [u8; 20],
 }
 
-fn test_key() -> TestKey {
+pub(crate) fn test_key() -> TestKey {
     let sk = k256::ecdsa::SigningKey::from_bytes(&k256::FieldBytes::clone_from_slice(&[0x42; 32]))
         .unwrap();
     let enc = sk.verifying_key().to_encoded_point(false);
@@ -743,7 +792,7 @@ fn test_key() -> TestKey {
 /// What the MPC returns for digest `hash` with nonce `k`: the compressed `big_r` (no prefix,
 /// as in the probe), `s`, and the recovery id. With `high_s` the value of `s` is negated and
 /// the parity flipped, which is the form that needs normalising.
-fn mpc_response(key: &TestKey, hash: &[u8; 32], k: u64, high_s: bool) -> MpcSignature {
+pub(crate) fn mpc_response(key: &TestKey, hash: &[u8; 32], k: u64, high_s: bool) -> MpcSignature {
     use k256::elliptic_curve::point::AffineCoordinates;
     use k256::elliptic_curve::sec1::ToEncodedPoint;
     use k256::elliptic_curve::PrimeField;
