@@ -1,0 +1,29 @@
+{
+  "mpc": "v1.signer-prod.testnet",
+  "predecessor": "windswapv4-user.testnet",
+  "derived": {
+    "evm": {
+      "near_key": "secp256k1:45BBRRyeF5G1tGqRaKJbXo2GZCS3HAC5WDsHypN6HhHQxghdBdpKjmFA3ApTREx6a4sAyV5a5WHiiLedWpyWP1nk",
+      "view_args": {
+        "path": "ethereum-1",
+        "predecessor": "windswapv4-user.testnet",
+        "domain_id": 0
+      },
+      "key_kind": "secp256k1",
+      "pubkey_hex": "99a6dc3a46dbb15bb0c20c38f5c58ec391a60c876b5ae6a7851d73c79606001e428ab0a3556dc43bdfc06a87f62c0ea42f44601d8847758ee14f3bb1b9b3dfdd",
+      "compressed_hex": "0399a6dc3a46dbb15bb0c20c38f5c58ec391a60c876b5ae6a7851d73c79606001e",
+      "evm_address": "0x68378500c10e3fc0b46b9f00f8d9839b5973d845"
+    },
+    "sol": {
+      "near_key": "ed25519:6wptuEHgPoXhrCYoa4sWowe9R8BiPZfDRd1foHS2caor",
+      "view_args": {
+        "path": "solana-1",
+        "predecessor": "windswapv4-user.testnet",
+        "domain_id": 1
+      },
+      "key_kind": "ed25519",
+      "pubkey_hex": "5855f403fbf478e106adff70388a001c068aea683cc036c7173db844b6e11669",
+      "solana_address": "6wptuEHgPoXhrCYoa4sWowe9R8BiPZfDRd1foHS2caor"
+    }
+  }
+}

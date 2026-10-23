@@ -1,0 +1,16 @@
+{
+  "name": "chainsig-probe",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Phase 0b: NEAR Chain Signatures testnet probe (derive, sign, verify locally)",
+  "type": "module",
+  "scripts": {
+    "addresses": "node derive.mjs",
+    "verify": "node verify.mjs"
+  },
+  "dependencies": {
+    "@noble/curves": "^1.9.7",
+    "@noble/hashes": "^1.8.0",
+    "@scure/base": "^1.2.6"
+  }
+}

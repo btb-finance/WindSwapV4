@@ -1,0 +1,182 @@
+[
+  {
+    "file": "sign_evm_1.txt",
+    "kind": "evm",
+    "run": 1,
+    "checks": [
+      {
+        "label": "R.x mod n == r (recomputed from big_r)",
+        "ok": true
+      },
+      {
+        "label": "recovered pubkey == derived pubkey",
+        "ok": true
+      },
+      {
+        "label": "recovered EVM address == derived EVM address",
+        "ok": true
+      },
+      {
+        "label": "standard ECDSA verify with derived pubkey",
+        "ok": true
+      },
+      {
+        "label": "negative control: tampered msg does not recover derived key",
+        "ok": true
+      }
+    ],
+    "s_normalised": false,
+    "r_hex": "44f0a8938f5a7bbb4d199438af374cb008dbb93b273c4158f2bea8f8fc78f2a8",
+    "s_hex": "3c42f8027d16759417d37df71ce65160e9beac1f38dc1a483634254794968c74",
+    "recovery_id": 0,
+    "recovered_pubkey_hex": "99a6dc3a46dbb15bb0c20c38f5c58ec391a60c876b5ae6a7851d73c79606001e428ab0a3556dc43bdfc06a87f62c0ea42f44601d8847758ee14f3bb1b9b3dfdd",
+    "recovered_evm_address": "0x68378500c10e3fc0b46b9f00f8d9839b5973d845",
+    "all_ok": true
+  },
+  {
+    "file": "sign_evm_2.txt",
+    "kind": "evm",
+    "run": 2,
+    "checks": [
+      {
+        "label": "R.x mod n == r (recomputed from big_r)",
+        "ok": true
+      },
+      {
+        "label": "recovered pubkey == derived pubkey",
+        "ok": true
+      },
+      {
+        "label": "recovered EVM address == derived EVM address",
+        "ok": true
+      },
+      {
+        "label": "standard ECDSA verify with derived pubkey",
+        "ok": true
+      },
+      {
+        "label": "negative control: tampered msg does not recover derived key",
+        "ok": true
+      }
+    ],
+    "s_normalised": false,
+    "r_hex": "889b36b14a14132b5c3294674a7f6b2acf99419c43a17a3b8417ef275dc3faf4",
+    "s_hex": "7513ff534708652e2ee6bb3106ca050184be08a14e2e82caefeb39befd15b892",
+    "recovery_id": 1,
+    "recovered_pubkey_hex": "99a6dc3a46dbb15bb0c20c38f5c58ec391a60c876b5ae6a7851d73c79606001e428ab0a3556dc43bdfc06a87f62c0ea42f44601d8847758ee14f3bb1b9b3dfdd",
+    "recovered_evm_address": "0x68378500c10e3fc0b46b9f00f8d9839b5973d845",
+    "all_ok": true
+  },
+  {
+    "file": "sign_evm_3.txt",
+    "kind": "evm",
+    "run": 3,
+    "checks": [
+      {
+        "label": "R.x mod n == r (recomputed from big_r)",
+        "ok": true
+      },
+      {
+        "label": "recovered pubkey == derived pubkey",
+        "ok": true
+      },
+      {
+        "label": "recovered EVM address == derived EVM address",
+        "ok": true
+      },
+      {
+        "label": "standard ECDSA verify with derived pubkey",
+        "ok": true
+      },
+      {
+        "label": "negative control: tampered msg does not recover derived key",
+        "ok": true
+      }
+    ],
+    "s_normalised": false,
+    "r_hex": "08d19e3e6964d02f6c9e6aa7d48dabf115b07e5ad2c13b0f1e0050a00d97c622",
+    "s_hex": "640f86e527e259be0634bec72e5760fe4008e36c2f2470fe7d27069a9cbdae7e",
+    "recovery_id": 0,
+    "recovered_pubkey_hex": "99a6dc3a46dbb15bb0c20c38f5c58ec391a60c876b5ae6a7851d73c79606001e428ab0a3556dc43bdfc06a87f62c0ea42f44601d8847758ee14f3bb1b9b3dfdd",
+    "recovered_evm_address": "0x68378500c10e3fc0b46b9f00f8d9839b5973d845",
+    "all_ok": true
+  },
+  {
+    "file": "sign_sol_1.txt",
+    "kind": "sol",
+    "run": 1,
+    "checks": [
+      {
+        "label": "signature length is 64 bytes",
+        "ok": true
+      },
+      {
+        "label": "ed25519 verify(sig, payload, derived pubkey)",
+        "ok": true
+      },
+      {
+        "label": "negative control: tampered payload rejected",
+        "ok": true
+      },
+      {
+        "label": "negative control: other key rejected",
+        "ok": true
+      }
+    ],
+    "sig_len": 64,
+    "sig_hex": "864ef7dcf568e04d6ea703f1d303e41a771c4662b76ff2ca289a623788a628b530aeee05f1c5c81768e7b3750cde829c33867d3e6f38f4bd3e8fd9d15dbe740d",
+    "all_ok": true
+  },
+  {
+    "file": "sign_sol_2.txt",
+    "kind": "sol",
+    "run": 2,
+    "checks": [
+      {
+        "label": "signature length is 64 bytes",
+        "ok": true
+      },
+      {
+        "label": "ed25519 verify(sig, payload, derived pubkey)",
+        "ok": true
+      },
+      {
+        "label": "negative control: tampered payload rejected",
+        "ok": true
+      },
+      {
+        "label": "negative control: other key rejected",
+        "ok": true
+      }
+    ],
+    "sig_len": 64,
+    "sig_hex": "e8b83db7fa646ed4c9a59dc86d66b1e9ec863bae0a79c8b111c1451b57d05c4e043c791edf74a97b603389df72962e4eb65ae13fda8e81a4ec7ff598f283640c",
+    "all_ok": true
+  },
+  {
+    "file": "sign_sol_3.txt",
+    "kind": "sol",
+    "run": 3,
+    "checks": [
+      {
+        "label": "signature length is 64 bytes",
+        "ok": true
+      },
+      {
+        "label": "ed25519 verify(sig, payload, derived pubkey)",
+        "ok": true
+      },
+      {
+        "label": "negative control: tampered payload rejected",
+        "ok": true
+      },
+      {
+        "label": "negative control: other key rejected",
+        "ok": true
+      }
+    ],
+    "sig_len": 64,
+    "sig_hex": "0bd4ad96dce8f74a23a55cfc1ca984d15ea107faea00a9eece59a1d04194ed35a409e0c81a57cbc082ea17b90e4e9d5ed3b553d850c7334dae2f6606fb61c80e",
+    "all_ok": true
+  }
+]

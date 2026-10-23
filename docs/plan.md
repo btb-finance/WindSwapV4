@@ -112,6 +112,12 @@ NEAR offers most of what Stage 3 needs, without running our own validators. **To
            Users on ETH, Base, Solana, BTC, …
 ```
 
+### Measured on testnet (Phase 0b probe, 2026-10-23, see docs/chain-signatures.md)
+- `v1.signer-prod.testnet` produced valid secp256k1 (EVM) and Ed25519 (Solana) signatures for keys derived from a NEAR account; 6/6 verified locally.
+- Latency: ~4.5 s on-chain (request block → final receipt), ~8 s end-to-end via CLI, for both curves.
+- Cost: ~8.6 TGas and ~0.0008 NEAR per signature (signer pays the whole receipt tree) + 1 yoctoNEAR deposit.
+- Implication: payouts to other chains take ~5 s + the target chain's confirmation time. Swaps inside the contract stay ~1 s.
+
 ### Options
 | | A. NEAR contract + existing bridges (Omni / Intents) | B. NEAR contract + own Chain Signatures vaults + own relayer | C. Own server + single wallet (Stage 0) |
 |---|---|---|---|
@@ -444,8 +450,8 @@ The bond asset could be **$BTB / the Wind ve token**, which ties node security t
 
 ### Phase 0b: NEAR Prototype (2–3 weeks)
 - [ ] Wrap the engine library in a NEAR contract (`near-sdk`), deploy to NEAR testnet
-- [ ] Derive vault addresses via Chain Signatures for Base Sepolia (secp256k1) and Solana devnet (Ed25519)
-- [ ] Contract requests a payout signature → broadcaster bot sends it → measure **latency** and **cost**
+- [x] Derive vault addresses via Chain Signatures for EVM (secp256k1) and Solana (Ed25519)
+- [x] Signatures requested and verified locally (probe from a NEAR account; contract-initiated signing still to do) → latency ~4.5 s, ~0.0008 NEAR each
 - [ ] Try deposit flows: Omni Bridge / NEAR Intents (option A) vs own relayer (option B)
 - [ ] Check contract limits: gas for multi-tick CL swaps, storage cost of pool/ve state
 - [ ] **Decision:** NEAR (A or B) vs Stage 0 single wallet

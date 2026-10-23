@@ -1,0 +1,58 @@
+├  Unsigned transaction:
+│    signer_id:    windswapv4-user.testnet
+│    receiver_id:  v1.signer-prod.testnet
+│    actions:
+│       -- function call:      
+│                       method name:  sign
+│                       args:         {
+│                                       "request": {
+│                                         "domain_id": 0,
+│                                         "path": "ethereum-1",
+│                                         "payload_v2": {
+│                                           "Ecdsa": "9b75a30e8184ea6c7a97b8fd6aced2722c0eb0e0e303047d0ced1be70ab20eea"
+│                                         }
+│                                       }
+│                                     }
+│                       gas:          100.0 Tgas
+│                       deposit:      1 yoctoNEAR
+│     [0m
+├  Your transaction was signed successfully.
+│    Public key: ed25519:7icT2QVWAoPetZtSo6NYyBWxbZsjnEiA9fCNF1iUo13Y
+│    Signature:  ed25519:3mxGWMnWAmUsKvfuM3K2pTUH4MPUEfaGXzc8LPueiJ38gq7hmDUi8WknrPR2fQpmhUUFbCFqNPaccZ2snkRR3G4u
+│     [0m
+├  Transaction Execution Info:
+│    Gas burned: 0.315 Tgas
+│    Transaction fee: 0.0000314782903815 NEAR
+│    Transaction ID: 3YdAS7377FTWFP9RWBNh1gocCkk8V3xNoTgRpiUfQZQU
+│    To see the transaction in the transaction explorer, please open this url in your browser:
+│    https://explorer.testnet.near.org/transactions/3YdAS7377FTWFP9RWBNh1gocCkk8V3xNoTgRpiUfQZQU
+│     [0m
+├  Function execution logs:
+│    Logs [v1.signer-prod.testnet]:
+│      sign: predecessor=AccountId("windswapv4-user.testnet"), request=SignRequestArgs { path: "ethereum-1", payload: Ecdsa(BoundedVec { inner: [155, 117, 163, 14, 129, 132, 234, 108, 122, 151, 184, 253, 106, 206, 210, 114, 44, 14, 176, 224, 227, 3, 4, 125, 12, 237, 27, 231, 10, 178, 14, 234], witness: NonEmpty(()) }), domain_id: DomainId(0) }
+│    Logs [v1.signer-prod.testnet]:   No logs
+│    Logs [windswapv4-user.testnet]:   No logs
+│    Logs [windswapv4-user.testnet]:   No logs
+│     [0m
+
+Function execution return value (printed to stdout):
+{
+  "big_r": {
+    "affine_point": "0344f0a8938f5a7bbb4d199438af374cb008dbb93b273c4158f2bea8f8fc78f2a8"
+  },
+  "recovery_id": 0,
+  "s": {
+    "scalar": "3c42f8027d16759417d37df71ce65160e9beac1f38dc1a483634254794968c74"
+  },
+  "scheme": "Secp256k1"
+}
+
+
+The "sign" call to <v1.signer-prod.testnet> on behalf of <windswapv4-user.testnet> succeeded.
+
+
+
+
+Here is your console command if you need to script it or re-run:
+    [33mnear contract call-function as-transaction v1.signer-prod.testnet sign json-args '{"request":{"path":"ethereum-1","payload_v2":{"Ecdsa":"9b75a30e8184ea6c7a97b8fd6aced2722c0eb0e0e303047d0ced1be70ab20eea"},"domain_id":0}}' prepaid-gas '100.0 Tgas' attached-deposit '1 yoctoNEAR' sign-as windswapv4-user.testnet network-config testnet sign-with-legacy-keychain send[39m
+

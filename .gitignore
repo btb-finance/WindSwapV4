@@ -4,3 +4,4 @@ diff-tests/cache/
 .DS_Store
 .env
 *.pem
+node_modules/

@@ -1,0 +1,117 @@
+├  Unsigned transaction:
+│    signer_id:    windswapv4-user.testnet
+│    receiver_id:  v1.signer-prod.testnet
+│    actions:
+│       -- function call:      
+│                       method name:  sign
+│                       args:         {
+│                                       "request": {
+│                                         "domain_id": 1,
+│                                         "path": "solana-1",
+│                                         "payload_v2": {
+│                                           "Eddsa": "9b75a30e8184ea6c7a97b8fd6aced2722c0eb0e0e303047d0ced1be70ab20eea"
+│                                         }
+│                                       }
+│                                     }
+│                       gas:          100.0 Tgas
+│                       deposit:      1 yoctoNEAR
+│     
+├  Your transaction was signed successfully.
+│    Public key: ed25519:7icT2QVWAoPetZtSo6NYyBWxbZsjnEiA9fCNF1iUo13Y
+│    Signature:  ed25519:3b347FJgeocDu8vYJwopp5WVWM59SqNkPXNLTYCBKB6T2nmGSJXmdLy4rSymnPzzZE67KCwuv7FSGUu5yBYCQckw
+│     
+├  Transaction Execution Info:
+│    Gas burned: 0.315 Tgas
+│    Transaction fee: 0.0000314687536385 NEAR
+│    Transaction ID: 5z8ufFu7FEZ3QfuXtokiXk9xW74u4RM267eBZpah5bhw
+│    To see the transaction in the transaction explorer, please open this url in your browser:
+│    https://explorer.testnet.near.org/transactions/5z8ufFu7FEZ3QfuXtokiXk9xW74u4RM267eBZpah5bhw
+│     
+├  Function execution logs:
+│    Logs [v1.signer-prod.testnet]:
+│      sign: predecessor=AccountId("windswapv4-user.testnet"), request=SignRequestArgs { path: "solana-1", payload: Eddsa(BoundedVec { inner: [155, 117, 163, 14, 129, 132, 234, 108, 122, 151, 184, 253, 106, 206, 210, 114, 44, 14, 176, 224, 227, 3, 4, 125, 12, 237, 27, 231, 10, 178, 14, 234], witness: PossiblyEmpty(()) }), domain_id: DomainId(1) }
+│    Logs [v1.signer-prod.testnet]:   No logs
+│    Logs [windswapv4-user.testnet]:   No logs
+│    Logs [windswapv4-user.testnet]:   No logs
+│     
+
+Function execution return value (printed to stdout):
+{
+  "scheme": "Ed25519",
+  "signature": [
+    11,
+    212,
+    173,
+    150,
+    220,
+    232,
+    247,
+    74,
+    35,
+    165,
+    92,
+    252,
+    28,
+    169,
+    132,
+    209,
+    94,
+    161,
+    7,
+    250,
+    234,
+    0,
+    169,
+    238,
+    206,
+    89,
+    161,
+    208,
+    65,
+    148,
+    237,
+    53,
+    164,
+    9,
+    224,
+    200,
+    26,
+    87,
+    203,
+    192,
+    130,
+    234,
+    23,
+    185,
+    14,
+    78,
+    157,
+    94,
+    211,
+    181,
+    83,
+    216,
+    80,
+    199,
+    51,
+    77,
+    174,
+    47,
+    102,
+    6,
+    251,
+    97,
+    200,
+    14
+  ]
+}
+
+
+The "sign" call to <v1.signer-prod.testnet> on behalf of <windswapv4-user.testnet> succeeded.
+
+
+
+
+Here is your console command if you need to script it or re-run:
+    near contract call-function as-transaction v1.signer-prod.testnet sign json-args '{"request":{"path":"solana-1","payload_v2":{"Eddsa":"9b75a30e8184ea6c7a97b8fd6aced2722c0eb0e0e303047d0ced1be70ab20eea"},"domain_id":1}}' prepaid-gas '100.0 Tgas' attached-deposit '1 yoctoNEAR' sign-as windswapv4-user.testnet network-config testnet sign-with-legacy-keychain send
+
