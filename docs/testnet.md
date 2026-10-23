@@ -127,3 +127,14 @@ Wasm SHA-256 `03890a393061cc9a81ac4e2f8a4b23da5ea264292e37d15ad21f833157b818c5` 
 **Broadcast on Base Sepolia — first cross-chain payout signed by the NEAR contract:**
 tx [`0x6aaac922d72ad4649e6bcf59be513a976a2f993f748374044a963cbba3c17277`](https://sepolia.basescan.org/tx/0x6aaac922d72ad4649e6bcf59be513a976a2f993f748374044a963cbba3c17277),
 status success, block 0x2ecd268, from `0xaa817ca355475d22d5a410f401dc877ec401259e` (the contract's derived address, funded with 0.1 ETH) to `0x…dEaD`, 0.000001 ETH, 21000 gas.
+
+## WIND token (2026-10-23)
+
+| | |
+|---|---|
+| Token | `windswapv4-wind.testnet` (crate `crates/wind-token`) |
+| Metadata | Wind / WIND / 18 decimals |
+| Owner + minter | `windswapv4-btb.testnet` (the Wind Swap v4 contract) |
+| Total supply | 0 (minted only by the contract's Minter at epoch flips, once wired) |
+| Check | `mint` from any other account panics `Only the minter can mint` |
+| Wasm SHA-256 | `a2036647ff5845639ddee4938cff372390196563df0dc74e40cfdc5e9566cb79` |
