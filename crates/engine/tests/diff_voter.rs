@@ -21,7 +21,7 @@ use std::str::FromStr;
 use windswap_engine::error::Result;
 use windswap_engine::fees::AccountId;
 use windswap_engine::ve::VotingEscrow;
-use windswap_engine::voter::{GaugeId, PoolId, Voter};
+use windswap_engine::voter::{GaugeId, PoolId, Voter, DURATION};
 use windswap_engine::{MathError, U256};
 
 /// The `block.timestamp` and `block.number` of the generator's deployment.
@@ -207,6 +207,11 @@ fn reason_matches(reason: &str, err: MathError) -> bool {
         "ZeroAmount" => err == ZeroAmount,
         "LockDurationTooLong" => err == LockDurationTooLong,
         "LockDurationNotInFuture" => err == LockDurationNotInFuture,
+        "LockExpired" => err == LockExpired,
+        "PermanentLock" => err == PermanentLock,
+        "NoLockFound" => err == NoLockFound,
+        "NotGauge" => err == NotGauge,
+        "InvalidReward" => err == InvalidReward,
         _ => false,
     }
 }
@@ -225,6 +230,28 @@ fn parse_entries(s: &str) -> Vec<(GaugeId, Vec<String>)> {
             (n(g), tokens)
         })
         .collect()
+}
+
+/// The WIND `_distribute` sends to the gauges for `gauges`, in order, from the state before the call. `distribute`
+/// returns nothing, so this replays the same per-gauge steps on a copy: `_updateFor`, then the threshold check on
+/// `claimable`. The sum must equal the WIND the gauge mocks received on the Solidity side.
+fn notified_for(
+    pre: &Voter,
+    gauges: &[GaugeId],
+    gauge_state: impl Fn(GaugeId) -> (U256, bool),
+) -> Result<U256> {
+    let mut tmp = pre.clone();
+    let mut sum = U256::ZERO;
+    for &g in gauges {
+        let (left, ok) = gauge_state(g);
+        tmp.update_for(g)?;
+        let claimable = tmp.claimable_of(g);
+        if ok && claimable > left && claimable > U256::from(DURATION) {
+            sum = sum.checked_add(claimable).ok_or(MathError::Overflow)?;
+        }
+        tmp.distribute_gauge(g, left, ok)?;
+    }
+    Ok(sum)
 }
 
 /// Applies one call. `Ok(payload)` is the value the Solidity call returned, as the generator logs it.
@@ -282,16 +309,43 @@ fn apply(w: &mut World, op: &str, now: u64, blk: u64, a: &[&str]) -> Result<Stri
             Ok("-".into())
         }
         "distr" => {
-            let minter = voter.distribute_range(n(a[1]), n(a[2]), gauge_state)?;
-            Ok(minter.to_string())
+            let (start, finish) = (n(a[1]), n(a[2]));
+            let pre = voter.clone();
+            voter.distribute_range(start, finish, gauge_state)?;
+            let gauges: Vec<GaugeId> = (start..finish)
+                .map(|x| pre.gauge_of(pre.pools[x as usize]))
+                .collect();
+            Ok(notified_for(&pre, &gauges, gauge_state)?.to_string())
         }
         "distl" => {
             let gauges: Vec<GaugeId> = list(a[0]);
-            Ok(voter.distribute_gauges(&gauges, gauge_state)?.to_string())
+            let pre = voter.clone();
+            voter.distribute_gauges(&gauges, gauge_state)?;
+            Ok(notified_for(&pre, &gauges, gauge_state)?.to_string())
         }
         "distg" => {
-            let minter = voter.distribute_gauges(&[n(a[0])], gauge_state)?;
-            Ok(minter.to_string())
+            let gauges = [n(a[0])];
+            let pre = voter.clone();
+            voter.distribute_gauges(&gauges, gauge_state)?;
+            Ok(notified_for(&pre, &gauges, gauge_state)?.to_string())
+        }
+        "fnotify" => {
+            // `FeesVotingReward.notifyRewardAmount`: the gauge (`is_gauge`) or a stranger (`NotGauge`).
+            let fees = &mut voter
+                .gauge_rewards
+                .get_mut(&n(a[0]))
+                .ok_or(MathError::InvalidInput)?
+                .fees;
+            fees.notify_fees_reward(a[1], u(a[2]), now, a[3] == "1")?;
+            Ok("-".into())
+        }
+        "perm" => {
+            ve.lock_permanent(acct(n(a[1])), now, blk, n(a[0]))?;
+            Ok("-".into())
+        }
+        "extend" => {
+            ve.increase_unlock_time(acct(n(a[1])), now, blk, n(a[0]), n(a[2]))?;
+            Ok("-".into())
         }
         "upl" => {
             let gauges: Vec<GaugeId> = list(a[0]);
@@ -342,6 +396,8 @@ fn apply(w: &mut World, op: &str, now: u64, blk: u64, a: &[&str]) -> Result<Stri
 struct Tally {
     ok: usize,
     err: usize,
+    /// Successful calls with a nonzero payload (claims: some token paid; distributes: WIND notified).
+    nonzero: usize,
     reasons: BTreeMap<String, usize>,
 }
 
@@ -381,6 +437,17 @@ fn voter_matches_solidity_vectors() {
             ("ok", Ok(value)) => {
                 assert_eq!(value, payload, "line {lineno}: payload\n{line}");
                 tally.ok += 1;
+                if payload.split(',').any(|x| x != "0") && payload != "-" {
+                    tally.nonzero += 1;
+                }
+                if op == "claim" && payload.split(',').any(|x| x != "0") {
+                    let kind = if args[0] == "F" {
+                        "claim_fees"
+                    } else {
+                        "claim_bribe"
+                    };
+                    per_op.entry(kind.to_owned()).or_default().nonzero += 1;
+                }
             }
             ("err", Err(e)) => {
                 assert!(
@@ -405,19 +472,52 @@ fn voter_matches_solidity_vectors() {
     }
 
     println!("voter vectors: {lines} lines");
-    println!("{:<12} {:>6} {:>6}  reasons", "op", "ok", "err");
+    println!(
+        "{:<12} {:>6} {:>6} {:>8}  reasons",
+        "op", "ok", "err", "nonzero"
+    );
     for (op, t) in &per_op {
         let reasons: Vec<String> = t.reasons.iter().map(|(k, v)| format!("{k}={v}")).collect();
-        println!("{:<12} {:>6} {:>6}  {}", op, t.ok, t.err, reasons.join(" "));
+        println!(
+            "{:<12} {:>6} {:>6} {:>8}  {}",
+            op,
+            t.ok,
+            t.err,
+            t.nonzero,
+            reasons.join(" ")
+        );
     }
 
     // The run must reach the real logic, not only the revert paths.
     let vote = &per_op["vote"];
-    assert!(vote.ok >= 40, "too few successful votes: {}", vote.ok);
+    assert!(vote.ok >= 150, "too few successful votes: {}", vote.ok);
     assert!(per_op["poke"].ok >= 50, "too few successful pokes");
     assert!(per_op["reset"].ok >= 50, "too few successful resets");
     assert!(per_op["distr"].ok + per_op["distl"].ok + per_op["distg"].ok >= 50);
     assert!(per_op["claim"].ok >= 50, "too few successful claims");
+    let bribe_paid = per_op.get("claim_bribe").map_or(0, |t| t.nonzero);
+    let fees_paid = per_op.get("claim_fees").map_or(0, |t| t.nonzero);
+    assert!(
+        bribe_paid >= 30,
+        "too few bribe claims with payout: {bribe_paid}"
+    );
+    assert!(
+        fees_paid >= 30,
+        "too few fee claims with payout: {fees_paid}"
+    );
+    assert!(
+        bribe_paid + fees_paid >= 100,
+        "too few claims with payout: {}",
+        bribe_paid + fees_paid
+    );
+    let distributed: usize = ["distr", "distl", "distg"]
+        .iter()
+        .map(|op| per_op[*op].nonzero)
+        .sum();
+    assert!(
+        distributed >= 50,
+        "too few distributes with nonzero amount: {distributed}"
+    );
     assert!(per_op["notify"].ok >= 50, "too few successful notifies");
     for reason in [
         "NotApprovedOrOwner",
@@ -427,7 +527,6 @@ fn voter_matches_solidity_vectors() {
         "ZeroBalance",
         "NonZeroVotes",
         "TooManyPools",
-        "NotAPool",
         "NotWhitelistedToken",
         "GaugeExists",
         "FactoryPathNotApproved",

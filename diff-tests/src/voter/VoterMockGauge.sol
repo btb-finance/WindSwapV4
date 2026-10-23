@@ -2,17 +2,27 @@
 pragma solidity ^0.8.19;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IReward} from "../../windv2/contracts/interfaces/IReward.sol";
 
 /// @notice Gauge double for the voter generator. `left()` and `fail` are set by the generator. `notifyRewardAmount`
 /// pulls the reward token from the caller (the Voter, which approves exactly the claimable amount) or reverts when
 /// `fail` is set, which exercises the Voter's `try` / restore path.
 contract VoterMockGauge {
     IERC20 public immutable rewardToken;
+    address public immutable fees;
     uint256 public left;
     bool public fail;
 
-    constructor(address _token) {
+    constructor(address _token, address _fees) {
         rewardToken = IERC20(_token);
+        fees = _fees;
+    }
+
+    /// @notice Notifies the gauge's `FeesVotingReward` as the gauge (the Voter maps this gauge to `fees`). The
+    /// generator mints the token to this contract first, and the approval is set here.
+    function notifyFees(address token, uint256 amount) external {
+        require(IERC20(token).approve(fees, amount), "approve");
+        IReward(fees).notifyRewardAmount(token, amount);
     }
 
     function setLeft(uint256 _left) external {
@@ -31,8 +41,8 @@ contract VoterMockGauge {
 
 /// @notice Gauge factory double: deploys a `VoterMockGauge` for the reward token passed as `_ve`.
 contract VoterMockGaugeFactory {
-    function createGauge(address, address, address, address _token, bool) external returns (address) {
-        return address(new VoterMockGauge(_token));
+    function createGauge(address, address, address _fees, address _token, bool) external returns (address) {
+        return address(new VoterMockGauge(_token, _fees));
     }
 }
 
