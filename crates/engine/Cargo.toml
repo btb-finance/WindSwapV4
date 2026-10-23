@@ -1,0 +1,11 @@
+[package]
+name = "windswap-engine"
+description = "Wind Swap v4 engine: pure, deterministic port of the Wind Swap pool and tokenomics logic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+alloy-primitives = { workspace = true }

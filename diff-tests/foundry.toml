@@ -1,0 +1,13 @@
+[profile.default]
+src = "src"
+test = "test"
+out = "out"
+libs = []
+auto_detect_solc = true
+optimizer = true
+optimizer_runs = 200
+gas_limit = "18446744073709551615"
+fs_permissions = [
+    { access = "read", path = "./out" },
+    { access = "read-write", path = "./vectors" },
+]
