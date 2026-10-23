@@ -102,7 +102,8 @@ contract GenerateOracleVectors {
             opGrow(uint16(1 + rand() % 50));
         } else if (pick < 80) {
             uint32 tq = uint32(uint256(t) + (rand() % 3 == 0 ? rand() % 500 : 0));
-            opObsOne(tq, randAgo(), randTick(), randLiq());
+            uint32 ago = rand() % 2 == 0 ? exactAgo(tq) : randAgo();
+            opObsOne(tq, ago, randTick(), randLiq());
         } else {
             uint32 tq = uint32(uint256(t) + (rand() % 3 == 0 ? rand() % 500 : 0));
             uint256 n = 1 + rand() % 5;
@@ -110,8 +111,25 @@ contract GenerateOracleVectors {
             for (uint256 k = 0; k < n; k++) {
                 agos[k] = randAgo();
             }
+            if (rand() % 2 == 0) agos[rand() % n] = exactAgo(tq);
             opObs(tq, agos, randTick(), randLiq());
         }
+    }
+
+    /// A secondsAgo that lands exactly on an initialized observation's timestamp, chosen as the
+    /// newest, the oldest, or a random slot (a middle one, which exercises the binary search).
+    /// Falls back to a random value when the chosen slot is uninitialized.
+    function exactAgo(uint32 time) internal returns (uint32) {
+        (uint16 idx, uint16 card, ) = h.state();
+        if (card == 0) return randAgo();
+        uint256 m = rand() % 3;
+        uint16 slot;
+        if (m == 0) slot = idx;
+        else if (m == 1) slot = uint16((uint256(idx) + 1) % card);
+        else slot = uint16(rand() % card);
+        (uint32 ts, , , bool ini) = h.observation(slot);
+        if (!ini) return randAgo();
+        return uint32(uint256(time) + TWO_32 - uint256(ts));
     }
 
     function randTick() internal returns (int24) {

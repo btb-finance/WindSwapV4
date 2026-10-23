@@ -126,6 +126,9 @@ impl Replay {
                 if ago > time {
                     self.bump("obsone.target_wrapped");
                 }
+                if ago != 0 {
+                    self.count_exact("obsone", time.wrapping_sub(ago));
+                }
                 oracle::observe_single(
                     &self.obs,
                     time,
@@ -139,6 +142,10 @@ impl Replay {
             }
             "obs" => {
                 let agos: Vec<u32> = args[3].split(',').map(p32).collect();
+                let time = p32(args[0]);
+                for &ago in agos.iter().filter(|&&ago| ago != 0) {
+                    self.count_exact("obs", time.wrapping_sub(ago));
+                }
                 oracle::observe(
                     &self.obs,
                     p32(args[0]),
@@ -153,6 +160,28 @@ impl Replay {
             other => panic!("{at}: unknown op {other:?}"),
         };
         self.compare(at, op, status, expected, result);
+    }
+
+    /// Counts a query whose target equals an initialized observation's timestamp, by which slot it hits.
+    fn count_exact(&mut self, op: &str, target: u32) {
+        if self.cardinality == 0 {
+            return;
+        }
+        let card = self.cardinality;
+        let hit = self
+            .obs
+            .iter()
+            .find(|(&slot, o)| slot < card && o.initialized && o.block_timestamp == target)
+            .map(|(&slot, _)| slot);
+        let Some(slot) = hit else { return };
+        let kind = if slot == self.index {
+            "newest"
+        } else if slot == self.index.wrapping_add(1) % card {
+            "oldest"
+        } else {
+            "middle"
+        };
+        self.bump(format!("{op}.exact_{kind}"));
     }
 
     fn write(&mut self, args: &[&str]) -> Result<String, MathError> {
@@ -291,6 +320,12 @@ impl Replay {
             "obsone.ok",
             "obsone.err.OLD",
             "obsone.target_wrapped",
+            "obsone.exact_newest",
+            "obsone.exact_oldest",
+            "obsone.exact_middle",
+            "obs.exact_newest",
+            "obs.exact_oldest",
+            "obs.exact_middle",
             "obs.ok",
             "obs.err.OLD",
             "obs.err.I",
