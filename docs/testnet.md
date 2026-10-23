@@ -157,3 +157,27 @@ signing with viem exactly like MetaMask `personal_sign`; every NEAR transaction 
 | final balances | 14.8451 tUSDC, 19.2035 tWETH — exactly 20 − LP − swap in (+ swap out) |
 
 Signed message format: `Wind Swap v4 action on windswapv4-btb.testnet by evm:0x… nonce N expires T: {"Swap":{…}}` (EIP-191).
+
+## v5: cross-chain — deposit on Base, trade on NEAR, withdraw to Base (2026-10-23)
+
+Redeployed with `migrate` (v4 → bridge state); then `HopInput.token_in` fix redeployed without migration
+(wasm SHA-256 `cfeed3c3bdad4b0f8ba812c2a3bbb58e11c1d0818e8329ce2683717ec25db74f`).
+Config: relayer `windswapv4-relayer.testnet`; `set_evm_chain(84532, "ethereum-1", next_nonce 1, max fee 5 gwei)`;
+`register_evm_asset(84532, "native", "base-sepolia:eth", 18, caps 0.05 ETH)`; pool 3 = base-sepolia:eth / tUSDC (spacing 4, price 3000).
+Nothing is deployed on Base: the vault is the contract's MPC-derived address `0xaa817ca355475d22d5a410f401dc877ec401259e`.
+
+Test user: a fresh EVM wallet `0x0d53794e20e0e4f96e07bcd8487ce557c6d9a4ac` (no NEAR account). All NEAR calls by the relayer.
+
+| Step | Result |
+|---|---|
+| withdrawal #0 (NEAR user → fresh wallet, 0.01 ETH): `process_withdrawal` → MPC sign (~10 s) → broadcast | [0x0bdf…0d2d](https://sepolia.basescan.org/tx/0x0bdf6576a18e99a6c03f4f343e5301128fcfc35eb2bae06c0d71f6502ec10d2d), wallet = 0.01 ETH |
+| fresh wallet sends 0.004 ETH on Base to the vault → `report_evm_deposit` | credited 0.004; replayed report returns `false` |
+| signed `WithdrawEvm` 0.004 → withdrawal #1 → broadcast | [0x16e2…f56f](https://sepolia.basescan.org/tx/0x16e28d0f1886270053e1447104989373cafa4def3f0bab6b32665272898ff56f) |
+| fresh wallet sends 0.003 ETH on Base → reported | [0xefa0…1a76](https://sepolia.basescan.org/tx/0xefa045cc9e47a02d76e25c40be0ca572ef467407cd05c4330356f0c3d4ca1a76), credited 0.003 |
+| signed `SwapExactInput` 0.002 ETH → tUSDC (pool 3) | 5.8151 tUSDC |
+| signed `SwapExactInput` all tUSDC → ETH | 0.0019980 ETH |
+| signed `WithdrawEvm` 0.0029980 ETH → withdrawal #2 → broadcast | [0x8724…944d](https://sepolia.basescan.org/tx/0x872494075ad942e94b4cf9e84ee89ba4091f85f270135e3d8220b626c755944d) |
+| fresh wallet on Base at the end | 0.0099978 ETH = 0.01 − swap fees/price impact − Base gas |
+
+Bug found and fixed during this run: multi-hop paths typed `token_in` as a NEAR AccountId, so internal ids like
+`base-sepolia:eth` were rejected (commit 9ca8033, regression test added).
