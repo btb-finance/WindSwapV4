@@ -1,0 +1,36 @@
+{
+  "near": {
+    "rpcUrl": "https://rpc.testnet.near.org",
+    "contractId": "windswapv4-btb.testnet",
+    "relayerAccountId": "windswapv4-user.testnet",
+    "credentialsPath": "~/.near-credentials/testnet/windswapv4-user.testnet.json",
+    "gasTgas": { "report": 50, "process": 200, "mark": 30 }
+  },
+  "evm": [
+    {
+      "name": "base-sepolia",
+      "chainId": 84532,
+      "rpcUrl": "https://sepolia.base.org",
+      "vault": "0xaa817ca355475d22d5a410f401dc877ec401259e",
+      "confirmations": 3,
+      "startBlock": 49070000,
+      "scanBatchSize": 200,
+      "requestsPerSecond": 20,
+      "blockConcurrency": 8,
+      "maxFeePerGasCapFallback": "100000000000"
+    }
+  ],
+  "pollIntervalMs": 15000,
+  "stateDir": "state",
+  "withdrawalLimit": 20,
+  "fallbackAssets": [
+    {
+      "chain_id": 84532,
+      "asset": "native",
+      "token_id": "PLACEHOLDER-eth.testnet",
+      "decimals": 18,
+      "per_deposit_cap": "1000000000000000000",
+      "daily_withdraw_cap": "10000000000000000000"
+    }
+  ]
+}
