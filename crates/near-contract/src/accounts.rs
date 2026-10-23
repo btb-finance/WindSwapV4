@@ -197,6 +197,33 @@ pub fn action_message(
     )
 }
 
+/// Builds the exact intent message the wallet must sign (see `submit_intent` in `intents.rs`).
+/// `intent_json` is the canonical JSON of the `Intent`.
+pub fn intent_message(
+    contract: &AccountId,
+    wallet: &WalletId,
+    nonce: u64,
+    expires: u64,
+    intent_json: &str,
+) -> String {
+    format!(
+        "Wind Swap v4 intent on {contract} by {wallet} nonce {nonce} expires {expires}: {intent_json}"
+    )
+}
+
+/// Builds the exact message a wallet signs to cancel intent `id` (see `cancel_intent`).
+pub fn cancel_intent_message(
+    contract: &AccountId,
+    wallet: &WalletId,
+    nonce: u64,
+    expires: u64,
+    id: u64,
+) -> String {
+    format!(
+        "Wind Swap v4 cancel intent on {contract} by {wallet} nonce {nonce} expires {expires}: {id}"
+    )
+}
+
 /// Verifies an EIP-191 `personal_sign` signature over `msg` (65 bytes `r || s || v`).
 ///
 /// `v` may be 27/28 or 0/1. High-s signatures are rejected. Returns true only when the

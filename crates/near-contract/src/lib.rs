@@ -23,8 +23,11 @@
 //!   wallet's owner instead of the sender.
 //!
 //! v0 limitations (intentional, for the testnet demo):
-//! - `ft_on_transfer` reads only `msg.owner`. Any other message is a plain deposit. Swap
-//!   instructions in `msg` come later.
+//! - `ft_on_transfer` reads `msg.owner`. A message with a `swap` or `add_liquidity` key runs
+//!   that one-step flow (see `oneclick`), and a failed one is refunded. Any other message is a
+//!   plain deposit.
+//! - EVM intents (v8): a wallet signs an intent once, and it runs from the owner's balance when
+//!   the relayer reports the deposit (see `intents`).
 //! - EVM deposits and withdrawals (v5): the relayer reports deposits with `report_evm_deposit`
 //!   and signs withdrawals with `process_withdrawal`. The owner registers EVM assets and chains.
 //!   See the "EVM bridge" section below.
@@ -62,6 +65,8 @@
 
 mod accounting;
 mod evm;
+mod intents;
+mod oneclick;
 mod tokenomics;
 mod views;
 
@@ -142,6 +147,10 @@ enum StorageKey {
     StakesByOwner,
     WithdrawalsByOwner,
     BalanceTokensByOwner,
+    // Appended in v8 (one-step flows and intents). See `intents`.
+    Intents,
+    IntentsByOwner,
+    OpenIntents,
 }
 
 #[near(contract_state)]
@@ -238,13 +247,21 @@ pub struct Contract {
     withdrawals_by_owner: LookupMap<Owner, Vec<u64>>,
     /// Tokens with a nonzero internal balance, per owner.
     balance_tokens_by_owner: LookupMap<Owner, Vec<String>>,
+    // Appended in v8 (one-step flows and intents, see `intents`).
+    /// Intents by id.
+    intents: LookupMap<u64, intents::StoredIntent>,
+    next_intent_id: u64,
+    /// Every intent id per owner, in submission order.
+    intents_by_owner: LookupMap<Owner, Vec<u64>>,
+    /// Open intent ids per owner, oldest first. At most `intents::MAX_OPEN_INTENTS`.
+    open_intents: LookupMap<Owner, Vec<u64>>,
 }
 
-/// State layout of the deployed testnet contract (v6): the `Contract` struct before the solvency
-/// accounting fields. Only used by `migrate`. Field order and types must match the deployed state
+/// State layout of the deployed testnet contract (v7): the `Contract` struct before the one-step
+/// flows and intents. Only used by `migrate`. Field order and types must match the deployed state
 /// exactly.
 #[near(serializers = [borsh])]
-struct ContractV6 {
+struct ContractV7 {
     owner: AccountId,
     fee_config: FeeConfig,
     pools: IterableMap<u64, ClPool>,
@@ -277,6 +294,18 @@ struct ContractV6 {
     wind_genesis_pending: bool,
     wind_minted: u128,
     pending_epoch: Option<PendingEpoch>,
+    liabilities: LookupMap<String, u128>,
+    accounted: LookupSet<(Owner, String)>,
+    needs_seed: bool,
+    pool_reserves: LookupMap<(u64, String), i128>,
+    reserve_totals: LookupMap<String, i128>,
+    reserves_seeded: LookupSet<(u64, String)>,
+    pending_withdrawals: LookupMap<String, u128>,
+    unbacked: LookupMap<String, u128>,
+    positions_by_owner: LookupMap<Owner, Vec<RangeKey>>,
+    stakes_by_owner: LookupMap<Owner, Vec<RangeKey>>,
+    withdrawals_by_owner: LookupMap<Owner, Vec<u64>>,
+    balance_tokens_by_owner: LookupMap<Owner, Vec<String>>,
 }
 
 #[derive(Clone)]
@@ -422,7 +451,7 @@ pub struct PositionView {
 /// One hop of a multi-hop route as passed by the caller. `token_in` is the token paid into
 /// this hop. The output token is the other token of the pool.
 #[derive(Clone)]
-#[near(serializers = [json])]
+#[near(serializers = [json, borsh])]
 pub struct HopInput {
     pub pool_id: u64,
     /// Token id: a NEP-141 account id or a registered internal token id (e.g. `base-sepolia:eth`).
@@ -937,23 +966,33 @@ impl Contract {
     /// input token is not the previous hop's output, a token that is not in its pool, or an
     /// unknown pool.
     fn resolve_path(&self, path: &[HopInput]) -> Route {
+        self.try_resolve_path(path)
+            .unwrap_or_else(|e| env::panic_str(&e))
+    }
+
+    /// `resolve_path` that returns the reason instead of panicking. Changes nothing.
+    fn try_resolve_path(&self, path: &[HopInput]) -> Result<Route, String> {
         if path.is_empty() {
-            env::panic_str("empty path");
+            return Err("empty path".into());
         }
         let token_in = path[0].token_in.to_string();
         let mut current = token_in.clone();
         let mut hops = Vec::with_capacity(path.len());
         for (i, input) in path.iter().enumerate() {
             if input.token_in.as_str() != current.as_str() {
-                env::panic_str(&format!("discontinuous path at hop {i}"));
+                return Err(format!("discontinuous path at hop {i}"));
             }
-            let (token0, token1) = self.tokens_of(input.pool_id);
+            let (token0, token1) = self
+                .pool_tokens
+                .get(&input.pool_id)
+                .cloned()
+                .ok_or_else(|| format!("pool {} does not exist", input.pool_id))?;
             let (zero_for_one, token_out) = if current == token0 {
                 (true, token1)
             } else if current == token1 {
                 (false, token0)
             } else {
-                env::panic_str(&format!(
+                return Err(format!(
                     "token not in pool: {current} is not in pool {}",
                     input.pool_id
                 ));
@@ -964,11 +1003,11 @@ impl Contract {
             });
             current = token_out;
         }
-        Route {
+        Ok(Route {
             hops,
             token_in,
             token_out: current,
-        }
+        })
     }
 
     /// Working copies of the pools a route touches. The route runs on these copies, and only a
@@ -1480,26 +1519,26 @@ impl Contract {
             stakes_by_owner: LookupMap::new(StorageKey::StakesByOwner),
             withdrawals_by_owner: LookupMap::new(StorageKey::WithdrawalsByOwner),
             balance_tokens_by_owner: LookupMap::new(StorageKey::BalanceTokensByOwner),
+            intents: LookupMap::new(StorageKey::Intents),
+            next_intent_id: 0,
+            intents_by_owner: LookupMap::new(StorageKey::IntentsByOwner),
+            open_intents: LookupMap::new(StorageKey::OpenIntents),
         }
     }
 
-    /// Upgrade from the deployed testnet state (v6: the ve(3,3) layout) to v7 (solvency
-    /// accounting). Run once, as the init call of the redeploy:
+    /// Upgrade from the deployed testnet state (v7: solvency accounting) to v8 (one-step flows and
+    /// intents). Run once, as the init call of the redeploy:
     /// `near contract deploy <acct> use-file <wasm> with-init-call migrate json-args '{}'`.
     ///
-    /// Everything in v6 is kept. The v6 balances and pool reserves cannot be summed here (a
-    /// `LookupMap` cannot be iterated, and pool reserves are not stored), so the owner seeds them
-    /// with `seed_accounting` and `seed_pool_reserves`. Until then `get_token_accounting` reports
-    /// `migrated: true` and totals that are incomplete. The pending EVM withdrawals are summed here.
-    /// The four owner indexes (see `views`) also start empty; fill them with the `backfill_*` calls.
-    /// Only the contract account can call it (`#[private]`).
+    /// Every field of v7 is kept as it is, including the accounting totals, the seeding state and
+    /// the owner indexes. Only the intent collections are new, and they start empty. Only the
+    /// contract account can call it (`#[private]`).
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
-        let old: ContractV6 =
+        let old: ContractV7 =
             env::state_read().unwrap_or_else(|| env::panic_str("no contract state to migrate"));
-        let next_withdrawal_id = old.next_withdrawal_id;
-        let mut contract = Self {
+        Self {
             owner: old.owner,
             fee_config: old.fee_config,
             pools: old.pools,
@@ -1532,32 +1571,23 @@ impl Contract {
             wind_genesis_pending: old.wind_genesis_pending,
             wind_minted: old.wind_minted,
             pending_epoch: old.pending_epoch,
-            positions_by_owner: LookupMap::new(StorageKey::PositionsByOwner),
-            stakes_by_owner: LookupMap::new(StorageKey::StakesByOwner),
-            withdrawals_by_owner: LookupMap::new(StorageKey::WithdrawalsByOwner),
-            balance_tokens_by_owner: LookupMap::new(StorageKey::BalanceTokensByOwner),
-            liabilities: LookupMap::new(StorageKey::Liabilities),
-            accounted: LookupSet::new(StorageKey::Accounted),
-            needs_seed: true,
-            pool_reserves: LookupMap::new(StorageKey::PoolReserves),
-            reserve_totals: LookupMap::new(StorageKey::ReserveTotals),
-            reserves_seeded: LookupSet::new(StorageKey::ReservesSeeded),
-            pending_withdrawals: LookupMap::new(StorageKey::PendingOwed),
-            unbacked: LookupMap::new(StorageKey::Unbacked),
-        };
-        // Withdrawals not yet broadcast are still owed. They are few, and the ids are sequential.
-        for id in 0..next_withdrawal_id {
-            let Some(w) = contract.withdrawals.get(&id).cloned() else {
-                continue;
-            };
-            if matches!(
-                w.status,
-                WithdrawalStatus::Pending | WithdrawalStatus::Signed { .. }
-            ) {
-                contract.pending_add(&w.token_id, w.amount);
-            }
+            liabilities: old.liabilities,
+            accounted: old.accounted,
+            needs_seed: old.needs_seed,
+            pool_reserves: old.pool_reserves,
+            reserve_totals: old.reserve_totals,
+            reserves_seeded: old.reserves_seeded,
+            pending_withdrawals: old.pending_withdrawals,
+            unbacked: old.unbacked,
+            positions_by_owner: old.positions_by_owner,
+            stakes_by_owner: old.stakes_by_owner,
+            withdrawals_by_owner: old.withdrawals_by_owner,
+            balance_tokens_by_owner: old.balance_tokens_by_owner,
+            intents: LookupMap::new(StorageKey::Intents),
+            next_intent_id: 0,
+            intents_by_owner: LookupMap::new(StorageKey::IntentsByOwner),
+            open_intents: LookupMap::new(StorageKey::OpenIntents),
         }
-        contract
     }
 
     /// Owner only. Moves the v3 balances of the listed `(account, token)` pairs to their owner
@@ -1755,6 +1785,19 @@ impl Contract {
         let token = env::predecessor_account_id();
         if !self.allowed_tokens.contains(&token) {
             return PromiseOrValue::Value(amount);
+        }
+        // One-step flows (see `oneclick`). A plan that fails writes nothing and refunds the whole
+        // transfer, so a bad swap or zap never costs the sender anything.
+        if let Some(step) = oneclick::parse_one_step(&msg) {
+            let outcome =
+                step.and_then(|step| self.one_step(&sender_id, token.as_str(), amount.0, step));
+            return match outcome {
+                Ok(()) => PromiseOrValue::Value(U128(0)),
+                Err(reason) => {
+                    env::log_str(&format!("one-step transfer refunded: {reason}"));
+                    PromiseOrValue::Value(amount)
+                }
+            };
         }
         let parsed = parse_deposit_msg(&msg);
         let owner = match parsed.as_ref().and_then(|p| p.owner.as_ref()) {
@@ -2317,6 +2360,7 @@ impl Contract {
         }
         let owner = self.links.resolve(&WalletId::Evm(from));
         self.credit(&owner, &info.token_id, amount.0);
+        self.run_open_intent(owner, &info.token_id);
         env::log_str(&format!(
             "evm deposit: chain {chain_id} tx {} log {log_index}: {} {} from {}",
             evm::hex_0x(&hash),
@@ -2587,6 +2631,10 @@ pub mod accounts;
 mod accounts_tests;
 #[cfg(test)]
 mod bridge_tests;
+#[cfg(test)]
+mod intents_tests;
+#[cfg(test)]
+mod oneclick_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
