@@ -31,6 +31,20 @@ pub enum MathError {
     OracleNotInitialized,
     /// `Oracle`: requested time is older than the oldest observation (`"OLD"`).
     ObservationTooOld,
+    /// `CLPool.checkTicks`: invalid tick range (`"TLU"`, `"TLM"`, `"TUM"`).
+    InvalidTickRange,
+    /// `CLPool`: pool not initialized (`"LOK"` before `initialize`).
+    PoolNotInitialized,
+    /// `CLPool.initialize`: pool already initialized.
+    PoolAlreadyInitialized,
+    /// `CLPool`: zero amount (`"AS"`, `require(amount > 0)`).
+    ZeroAmount,
+    /// `CLPool.swap`: invalid sqrt price limit (`"SPL"`).
+    InvalidPriceLimit,
+    /// `CLPool.snapshotCumulativesInside`: tick not initialized.
+    TickNotInitialized,
+    /// `CLPool.setGaugeAndPositionManager`: gauge already set.
+    GaugeAlreadySet,
 }
 
 impl fmt::Display for MathError {
