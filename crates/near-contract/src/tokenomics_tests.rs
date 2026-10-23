@@ -424,3 +424,134 @@ fn signed_by(
     let msg = action_message(&acct(SELF), &evm_wallet(key), nonce, expires, &json);
     format!("0x{}", hex(&evm_sign(key, &msg)))
 }
+
+/// Two stakers in one range, with trades both ways in between. Each unstakes and gets back its own
+/// liquidity as its own range, with no one else's amounts: the wallet nets to zero (up to rounding),
+/// and the stakes are gone.
+#[test]
+fn two_stakers_in_one_range_each_unstake_with_only_their_own_amounts() {
+    const CAROL: &str = "carol.testnet";
+    let mut c = setup();
+    ctx(OWNER, T0, 0);
+    c.create_gauge(0);
+    alice_locks_and_provides(&mut c);
+    fund(&mut c, BOB, USDC, 10 * E18);
+    fund(&mut c, BOB, WNEAR, 10 * E18);
+    ctx(BOB, T0 + 25, 0);
+    c.mint_position(0, -300, 300, U128(E18));
+    ctx(ALICE, T0 + 30, 0);
+    c.stake_position(0, -300, 300);
+    ctx(BOB, T0 + 35, 0);
+    c.stake_position(0, -300, 300);
+
+    // Trades in both directions, small enough to stay inside the range.
+    fund(&mut c, CAROL, USDC, 10 * E18);
+    fund(&mut c, CAROL, WNEAR, 10 * E18);
+    ctx(CAROL, T0 + HOUR, 0);
+    c.swap(0, true, "1000000000000000".into(), "4295128740".into());
+    c.swap(
+        0,
+        false,
+        "1000000000000000".into(),
+        "1461446703485210103287273052203988822378723970341".into(),
+    );
+
+    let before = (bal(&c, ALICE, USDC), bal(&c, ALICE, WNEAR));
+    ctx(ALICE, T0 + 2 * HOUR, 0);
+    c.unstake_position(0, -300, 300);
+    let (a_usdc, a_wnear) = (bal(&c, ALICE, USDC), bal(&c, ALICE, WNEAR));
+    assert!(
+        a_usdc.abs_diff(before.0) <= 2 && a_wnear.abs_diff(before.1) <= 2,
+        "Alice nets zero"
+    );
+
+    let before = (bal(&c, BOB, USDC), bal(&c, BOB, WNEAR));
+    ctx(BOB, T0 + 3 * HOUR, 0);
+    c.unstake_position(0, -300, 300);
+    assert!(bal(&c, BOB, USDC).abs_diff(before.0) <= 2);
+    assert!(bal(&c, BOB, WNEAR).abs_diff(before.1) <= 2);
+
+    // Both are unstaked, so each can stake its range again.
+    ctx(ALICE, T0 + 4 * HOUR, 0);
+    c.stake_position(0, -300, 300);
+    ctx(BOB, T0 + 4 * HOUR, 0);
+    c.stake_position(0, -300, 300);
+}
+
+/// The stored manager of v6 has no per-NFT snapshots. `migrate_nft_positions` converts it in place:
+/// the staked NFT keeps its liquidity and owner, the snapshot and owed amounts start at zero, and
+/// the stake can still be unstaked afterwards. A second migration fails.
+#[test]
+fn migrate_nft_positions_converts_the_v6_layout_and_keeps_stakes() {
+    use near_sdk::IntoStorageKey;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let mut c = setup();
+    ctx(OWNER, T0, 0);
+    c.create_gauge(0);
+    alice_locks_and_provides(&mut c);
+    ctx(ALICE, T0 + 30, 0);
+    c.stake_position(0, -300, 300);
+    let token_id = *c
+        .stakes
+        .get(&(owner_of_account(&acct(ALICE)), 0, -300, 300))
+        .unwrap();
+
+    // The same manager in the v6 layout: the NFT without its per-NFT fields.
+    let nft = c.nft_manager.get().as_ref().unwrap();
+    let p = nft.position(token_id).unwrap().clone();
+    let owner_of_nft = nft.owner_or_zero(token_id).unwrap();
+    let old = tokenomics::NftManagerV6 {
+        account: tokenomics::nft_manager_account(),
+        next_id: U256::from(2),
+        positions: BTreeMap::from([(
+            token_id,
+            tokenomics::NftPositionV6 {
+                token0: p.token0,
+                token1: p.token1,
+                tick_spacing: p.tick_spacing,
+                tick_lower: p.tick_lower,
+                tick_upper: p.tick_upper,
+                liquidity: p.liquidity,
+            },
+        )]),
+        owners: BTreeMap::from([(token_id, owner_of_nft)]),
+        approvals: BTreeSet::new(),
+    };
+    let key = crate::StorageKey::NftManager.into_storage_key();
+    near_sdk::env::storage_write(&key, &near_sdk::borsh::to_vec(&old).unwrap());
+
+    ctx(OWNER, T0 + 40, 0);
+    assert_eq!(c.migrate_nft_positions(), 1);
+    let migrated = c.nft_manager.get().as_ref().unwrap();
+    assert_eq!(migrated.position(token_id).unwrap().liquidity, p.liquidity);
+    assert_eq!(migrated.position(token_id).unwrap().tokens_owed0, 0);
+    assert_eq!(
+        migrated.position(token_id).unwrap().fee_growth_inside0_last,
+        U256::ZERO
+    );
+    assert_eq!(migrated.owner_or_zero(token_id), Some(owner_of_nft));
+
+    // The stake still works: it is unstaked and its liquidity is back in the owner's range.
+    ctx(ALICE, T0 + 50, 0);
+    c.unstake_position(0, -300, 300);
+    assert!(c
+        .stakes
+        .get(&(owner_of_account(&acct(ALICE)), 0, -300, 300))
+        .is_none());
+}
+
+#[test]
+#[should_panic(expected = "nft manager is not in the v6 layout")]
+fn migrate_nft_positions_twice_fails() {
+    let mut c = setup();
+    ctx(OWNER, T0, 0);
+    c.create_gauge(0);
+    alice_locks_and_provides(&mut c);
+    ctx(ALICE, T0 + 30, 0);
+    c.stake_position(0, -300, 300);
+    // Persist the manager as a finished call would (the stored layout is v7 now), then migrate.
+    c.nft_manager.flush();
+    ctx(OWNER, T0 + 40, 0);
+    c.migrate_nft_positions();
+}

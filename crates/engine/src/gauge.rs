@@ -13,8 +13,9 @@
 //! - The voter's `isAlive(gauge)` answer is state on the gauge ([`ClGauge::set_alive`]).
 //! - `nonReentrant` is not modeled: calls are single-threaded and each one is atomic from
 //!   the caller's view (see the atomicity note below).
-//! - The NFT manager is [`PositionManager`]: a minimal model of the positions, owners and
-//!   approvals of NonfungiblePositionManager, enough for the gauge's calls.
+//! - The NFT manager is [`PositionManager`]: a model of the positions, owners and approvals of
+//!   NonfungiblePositionManager, with the same per-NFT fee accounting (`tokensOwed`, fee-growth
+//!   snapshots), enough for the gauge's calls.
 //!
 //! Atomicity: like a Solidity revert, an `Err` means the whole call must be discarded. The gauge,
 //! the NFT manager and the pool may be partially updated when an error is returned. Callers
@@ -26,6 +27,7 @@ use crate::error::MathError;
 use crate::math::full_math::mul_div;
 use crate::math::Q128;
 use crate::pool::cl_pool::{AccountId, ClPool};
+use crate::pool::position::{fees_owed, truncate_u128};
 use crate::U256;
 
 /// `ProtocolTimeLibrary.WEEK`
@@ -70,6 +72,12 @@ pub enum GaugeError {
     /// The gauge holds fewer tokens than it pays out (the ERC20 `BAL` revert): a reward payout, or
     /// the fee tokens sent to the fees voting reward.
     InsufficientBalance,
+    /// `"require(amount0Max > 0 || amount1Max > 0)"` in the NFT manager's `collect`.
+    ZeroCollect,
+    /// `"require(params.liquidity > 0)"` in the NFT manager's `decreaseLiquidity`.
+    ZeroLiquidity,
+    /// `"require(positionLiquidity >= params.liquidity)"` in the NFT manager's `decreaseLiquidity`.
+    InsufficientLiquidity,
 }
 
 impl From<MathError> for GaugeError {
@@ -96,7 +104,7 @@ fn to_i128(liquidity: u128) -> Result<i128> {
     i128::try_from(liquidity).map_err(|_| GaugeError::Math(MathError::Overflow))
 }
 
-/// One NFT position as the gauge reads it through `positions(tokenId)`.
+/// One NFT position, as `NonfungiblePositionManager.Position` (`positions(tokenId)`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(
     feature = "borsh",
@@ -109,19 +117,30 @@ pub struct NftPosition {
     pub tick_lower: i32,
     pub tick_upper: i32,
     pub liquidity: u128,
+    /// `feeGrowthInside{0,1}LastX128`: the pool position's fee growth as of this token's last sync.
+    pub fee_growth_inside0_last: U256,
+    pub fee_growth_inside1_last: U256,
+    /// `tokensOwed{0,1}`: fees and withdrawn principal owed to this token and not yet collected.
+    pub tokens_owed0: u128,
+    pub tokens_owed1: u128,
 }
 
-/// Minimal model of the NonfungiblePositionManager (`nft` of the pool and the gauge).
+/// Model of the NonfungiblePositionManager (`nft` of the pool and the gauge), with the same per-NFT
+/// accounting as the Solidity contract.
 ///
-/// - Positions: minted with `mint`, which puts the liquidity into the pool under this manager's
-///   account (`account`), as the real manager does. Ids start at 1.
+/// - Every NFT has its own `liquidity`, `feeGrowthInside{0,1}LastX128` and `tokensOwed{0,1}`. The
+///   liquidity of all unstaked NFTs sits in one pool position owned by the manager (`account`), so
+///   the pool position's owed amounts are shared by those NFTs. An NFT's share is computed from its
+///   own snapshot, as `collect` and `decreaseLiquidity` do, and only that share is paid out.
+/// - An NFT held by the gauge (`pool.gauge`) uses the gauge's pool position instead. A staked NFT
+///   accrues no fees (the pool routes the staked fees to the gauge), so only the owed amounts from
+///   before the stake are paid, as in the contract.
+/// - `mint` puts the liquidity into the manager's pool position, then snapshots it. Ids start at 1.
 /// - Owners and approvals: `transfer_from` (safeTransferFrom) requires the caller to be the owner
 ///   or approved for all by the owner (`set_approval_for_all`). Receiver hooks are not modeled.
-/// - `collect` mirrors `NonfungiblePositionManager.collect`: the caller must be owner or approved;
-///   when the position has liquidity it calls `burn(0)` on the pool position that holds it (the
-///   gauge's position if the gauge owns the NFT, the manager's otherwise), then pays out the
-///   requested owed amounts from that same pool position. The real manager pays per-NFT
-///   `tokensOwed`; this model pays the pool position's owed amounts (see the Solidity mock's note).
+/// - `collect` and `decrease_liquidity` poke the pool position first (`burn(0)` for `collect`, the
+///   burn itself for `decrease_liquidity`), then update the token's owed amounts. `collect` pays
+///   out at most the token's owed amounts, from the pool position that holds the token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(
     feature = "borsh",
@@ -136,6 +155,13 @@ pub struct PositionManager {
     approvals: BTreeSet<(AccountId, AccountId)>,
 }
 
+/// The pool position that holds an NFT's liquidity: the gauge's if the gauge owns the NFT
+/// (`isStaked`), the manager's otherwise.
+fn holder_of(pool: &ClPool, account: AccountId, nft_owner: AccountId) -> (bool, AccountId) {
+    let staked = pool.gauge == Some(nft_owner);
+    (staked, if staked { nft_owner } else { account })
+}
+
 impl PositionManager {
     pub fn new(account: AccountId) -> Self {
         PositionManager {
@@ -147,7 +173,8 @@ impl PositionManager {
         }
     }
 
-    /// `mintPosition`: `pool.mint(this, lo, up, liquidity)`, then records the NFT for `owner`.
+    /// `mintPosition`: `pool.mint(this, lo, up, liquidity)`, then records the NFT for `owner` with
+    /// its fee-growth snapshot taken from the pool position.
     #[allow(clippy::too_many_arguments)]
     pub fn mint(
         &mut self,
@@ -162,6 +189,7 @@ impl PositionManager {
         time: u32,
     ) -> Result<(U256, U256, U256)> {
         let (a0, a1) = pool.mint(self.account, tick_lower, tick_upper, liquidity, time)?;
+        let synced = pool.position(&self.account, tick_lower, tick_upper);
         let id = self.next_id;
         self.next_id += U256::from(1);
         self.owners.insert(id, owner);
@@ -174,9 +202,31 @@ impl PositionManager {
                 tick_lower,
                 tick_upper,
                 liquidity,
+                fee_growth_inside0_last: synced.fee_growth_inside0_last_x128,
+                fee_growth_inside1_last: synced.fee_growth_inside1_last_x128,
+                tokens_owed0: 0,
+                tokens_owed1: 0,
             },
         );
         Ok((id, a0, a1))
+    }
+
+    /// Rebuilds a manager from its parts. Used by the contract's state migrations, which read the
+    /// previous layout and write it back with the current one.
+    pub fn from_parts(
+        account: AccountId,
+        next_id: U256,
+        positions: BTreeMap<U256, NftPosition>,
+        owners: BTreeMap<U256, AccountId>,
+        approvals: BTreeSet<(AccountId, AccountId)>,
+    ) -> Self {
+        PositionManager {
+            account,
+            next_id,
+            positions,
+            owners,
+            approvals,
+        }
     }
 
     /// `setApprovalForAll(operator, approved)` called by `owner`.
@@ -231,6 +281,10 @@ impl PositionManager {
 
     /// `collect(CollectParams{tokenId, recipient, amount0Max, amount1Max})` called by `caller`.
     /// Returns the amounts paid to the recipient (the recipient itself is not modeled).
+    ///
+    /// Pokes the holding pool position (`burn(0)`, when the token has liquidity), adds the fees
+    /// since the token's snapshot (unstaked only), then pays `min(max, owed)` of this token from
+    /// the pool position. The pool position's other owed amounts stay for the other NFTs.
     pub fn collect(
         &mut self,
         pool: &mut ClPool,
@@ -240,32 +294,117 @@ impl PositionManager {
         amount1_max: u128,
         time: u32,
     ) -> Result<(u128, u128)> {
+        if amount0_max == 0 && amount1_max == 0 {
+            return Err(GaugeError::ZeroCollect);
+        }
         if !self.is_authorized(caller, token_id)? {
             return Err(GaugeError::NotApproved);
         }
         let owner = self.owner_of(token_id)?;
         let position = self.position(token_id)?.clone();
-        let pool_owner = if pool.gauge == Some(owner) {
-            owner
-        } else {
-            self.account
-        };
+        let (mut owed0, mut owed1) = (position.tokens_owed0, position.tokens_owed1);
+        let (staked, holder) = holder_of(pool, self.account, owner);
+        let (mut snapshot0, mut snapshot1) = (
+            position.fee_growth_inside0_last,
+            position.fee_growth_inside1_last,
+        );
         if position.liquidity > 0 {
-            pool.burn(
-                pool_owner,
-                position.tick_lower,
-                position.tick_upper,
-                0,
-                time,
-            )?;
+            pool.burn(holder, position.tick_lower, position.tick_upper, 0, time)?;
+            let synced = pool.position(&holder, position.tick_lower, position.tick_upper);
+            if !staked {
+                owed0 = owed0.wrapping_add(fees_owed(
+                    synced.fee_growth_inside0_last_x128,
+                    position.fee_growth_inside0_last,
+                    position.liquidity,
+                )?);
+                owed1 = owed1.wrapping_add(fees_owed(
+                    synced.fee_growth_inside1_last_x128,
+                    position.fee_growth_inside1_last,
+                    position.liquidity,
+                )?);
+            }
+            snapshot0 = synced.fee_growth_inside0_last_x128;
+            snapshot1 = synced.fee_growth_inside1_last_x128;
         }
-        Ok(pool.collect(
-            pool_owner,
+        // The NFT's own share, capped by the request. The pool pays at most the pool position's owed.
+        let amount0_collect = amount0_max.min(owed0);
+        let amount1_collect = amount1_max.min(owed1);
+        let paid = pool.collect(
+            holder,
             position.tick_lower,
             position.tick_upper,
-            amount0_max,
-            amount1_max,
-        )?)
+            amount0_collect,
+            amount1_collect,
+        )?;
+        let entry = self
+            .positions
+            .get_mut(&token_id)
+            .ok_or(GaugeError::InvalidToken)?;
+        entry.fee_growth_inside0_last = snapshot0;
+        entry.fee_growth_inside1_last = snapshot1;
+        // As the Solidity: the requested amounts are subtracted, not the amounts paid.
+        entry.tokens_owed0 = owed0 - amount0_collect;
+        entry.tokens_owed1 = owed1 - amount1_collect;
+        Ok(paid)
+    }
+
+    /// `decreaseLiquidity(tokenId, liquidity)` called by `caller`. Burns `liquidity` from the pool
+    /// position that holds the token, and adds the burned amounts (principal) and the fees since
+    /// the snapshot (unstaked only) to the token's owed amounts. Collect them with [`Self::collect`].
+    /// Returns the amounts burned from the pool position.
+    pub fn decrease_liquidity(
+        &mut self,
+        pool: &mut ClPool,
+        caller: AccountId,
+        token_id: U256,
+        liquidity: u128,
+        time: u32,
+    ) -> Result<(U256, U256)> {
+        if liquidity == 0 {
+            return Err(GaugeError::ZeroLiquidity);
+        }
+        if !self.is_authorized(caller, token_id)? {
+            return Err(GaugeError::NotApproved);
+        }
+        let owner = self.owner_of(token_id)?;
+        let position = self.position(token_id)?.clone();
+        if position.liquidity < liquidity {
+            return Err(GaugeError::InsufficientLiquidity);
+        }
+        let (staked, holder) = holder_of(pool, self.account, owner);
+        let (amount0, amount1) = pool.burn(
+            holder,
+            position.tick_lower,
+            position.tick_upper,
+            liquidity,
+            time,
+        )?;
+        let synced = pool.position(&holder, position.tick_lower, position.tick_upper);
+        // `uint128(amount)` truncates, as the Solidity.
+        let mut owed0 = position.tokens_owed0.wrapping_add(truncate_u128(amount0));
+        let mut owed1 = position.tokens_owed1.wrapping_add(truncate_u128(amount1));
+        if !staked {
+            owed0 = owed0.wrapping_add(fees_owed(
+                synced.fee_growth_inside0_last_x128,
+                position.fee_growth_inside0_last,
+                position.liquidity,
+            )?);
+            owed1 = owed1.wrapping_add(fees_owed(
+                synced.fee_growth_inside1_last_x128,
+                position.fee_growth_inside1_last,
+                position.liquidity,
+            )?);
+        }
+        let entry = self
+            .positions
+            .get_mut(&token_id)
+            .ok_or(GaugeError::InvalidToken)?;
+        entry.fee_growth_inside0_last = synced.fee_growth_inside0_last_x128;
+        entry.fee_growth_inside1_last = synced.fee_growth_inside1_last_x128;
+        entry.tokens_owed0 = owed0;
+        entry.tokens_owed1 = owed1;
+        entry.liquidity = position.liquidity - liquidity;
+        Ok((amount0, amount1))
     }
 }
 

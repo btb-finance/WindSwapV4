@@ -47,12 +47,12 @@ pub struct PositionKey {
 pub type Positions = BTreeMap<PositionKey, PositionInfo>;
 
 /// Solidity `uint128(x)`: truncates to the low 128 bits.
-fn truncate_u128(x: U256) -> u128 {
+pub(crate) fn truncate_u128(x: U256) -> u128 {
     (x & U256::from(u128::MAX)).to::<u128>()
 }
 
 /// Fees accrued since `fee_growth_last_x128`, for `liquidity` units, as `uint128`.
-fn fees_owed(
+pub(crate) fn fees_owed(
     fee_growth_inside_x128: U256,
     fee_growth_last_x128: U256,
     liquidity: u128,

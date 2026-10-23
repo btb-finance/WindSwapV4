@@ -239,6 +239,6 @@ Epoch: `active_period` 1792627200; first flip at **1793232000 (Thu 2026-10-29 00
 `claim_bribes` / `claim_fees`, veNFT holders `claim_rebase`, and the staked LP `claim_gauge_rewards`.
 
 Known gaps before mainnet (from the ve(3,3) wiring review):
-1. Fee leak between stakers that share one tick range (the engine's NFT-manager model pays a shared position's owed fees) — needs per-NFT owed accounting.
+1. ~~Fee leak between stakers that share one tick range~~ — fixed in v7: the NFT manager keeps per-NFT owed amounts (`PositionManager`), and a collect pays only the NFT's share. The v6 NFT manager is converted once by `migrate_nft_positions`.
 2. Each engine object is one Borsh blob (pools, ve, voter): gas grows with state — move to per-key storage.
 3. No WIND conservation invariant check yet.
