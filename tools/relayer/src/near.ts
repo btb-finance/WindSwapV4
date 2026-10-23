@@ -6,6 +6,8 @@ import type { NearConfig } from "./config.js";
 import type {
   AssetInfo,
   EvmChainInfo,
+  ExecuteArgs,
+  ExecuteOutcome,
   NearReader,
   NearWriter,
   ReportDepositArgs,
@@ -98,6 +100,25 @@ export function createNearWriter(cfg: NearConfig): NearWriter {
   }
 
   return {
+    async executeAction(args: ExecuteArgs): Promise<ExecuteOutcome> {
+      const outcome = await account.functionCall({
+        contractId: cfg.contractId,
+        methodName: "execute",
+        args: { ...args },
+        gas: BigInt(cfg.gasTgas.execute) * TGAS,
+        attachedDeposit: 0n,
+      });
+      const failure = failureText(outcome.status);
+      if (failure !== null) throw new Error(failure);
+      const txHash = (outcome as { transaction?: { hash?: string } }).transaction?.hash;
+      if (!txHash) throw new Error("NEAR outcome has no transaction hash");
+      const success = (outcome.status as { SuccessValue?: string }).SuccessValue;
+      const result =
+        success === undefined || success === ""
+          ? undefined
+          : (JSON.parse(Buffer.from(success, "base64").toString("utf8")) as unknown);
+      return result === undefined ? { txHash } : { txHash, result };
+    },
     async reportEvmDeposit(args: ReportDepositArgs) {
       const value = await change("report_evm_deposit", { ...args }, cfg.gasTgas.report);
       return value === true;
@@ -109,6 +130,19 @@ export function createNearWriter(cfg: NearConfig): NearWriter {
       await change("mark_withdrawal_broadcast", { ...args }, cfg.gasTgas.mark);
     },
   };
+}
+
+/**
+ * Text describing a failed execution, or null when the status is not a failure. Contract panics
+ * are rendered as `Smart contract panicked: <message>` so `isContractRejection` classifies them.
+ */
+function failureText(status: unknown): string | null {
+  const failure = (status as { Failure?: unknown }).Failure;
+  if (failure === undefined) return null;
+  const text = JSON.stringify(failure);
+  const panic = /panicked: ([^"\\]*)/.exec(text);
+  if (panic?.[1]) return `Smart contract panicked: ${panic[1].trim()}`;
+  return `NEAR transaction failed: ${text.slice(0, 500)}`;
 }
 
 /** True when the NEAR error is a contract-level rejection (panic) rather than an RPC/network failure. */

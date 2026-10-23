@@ -10,6 +10,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "tsx src/cli.ts run",
+    "serve": "tsx src/cli.ts serve",
     "once": "tsx src/cli.ts once",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"

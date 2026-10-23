@@ -20,7 +20,7 @@ describe("parseConfig", () => {
   it("applies defaults", () => {
     const cfg = parseConfig(base, {});
     expect(cfg.evm[0]?.requestsPerSecond).toBe(5);
-    expect(cfg.near.gasTgas).toEqual({ report: 50, process: 200, mark: 30 });
+    expect(cfg.near.gasTgas).toEqual({ report: 50, process: 200, mark: 30, execute: 300 });
     expect(cfg.stateDir).toBe("state");
   });
 
