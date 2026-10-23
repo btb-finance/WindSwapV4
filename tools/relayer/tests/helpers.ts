@@ -1,4 +1,4 @@
-import type { EvmChainConfig, RelayerConfig } from "../src/config.js";
+import { parseRelay, type EvmChainConfig, type RelayerConfig } from "../src/config.js";
 import { txHashOf } from "../src/evm.js";
 import type {
   AssetInfo,
@@ -59,13 +59,14 @@ export function relayerCfg(stateDir: string, chain: EvmChainConfig, fallbackAsse
       contractId: "windswapv4-btb.testnet",
       relayerAccountId: "relayer.testnet",
       credentialsPath: "/unused",
-      gasTgas: { report: 50, process: 200, mark: 30 },
+      gasTgas: { report: 50, process: 200, mark: 30, execute: 300 },
     },
     evm: [chain],
     pollIntervalMs: 1,
     stateDir,
     withdrawalLimit: 20,
     fallbackAssets,
+    relay: parseRelay(undefined, {}),
   };
 }
 
@@ -251,6 +252,9 @@ export function mockWriter(opts: {
     async markWithdrawalBroadcast(args) {
       if (opts.markError) throw opts.markError;
       w.marked.push(args);
+    },
+    async executeAction() {
+      throw new Error("executeAction is not used by the watcher tests");
     },
   };
   return w;

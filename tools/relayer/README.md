@@ -33,11 +33,14 @@ The file's `account_id` must match `near.relayerAccountId`. Only `run` and `once
 | `npm run start` | Loop forever: deposits, then withdrawals, every `pollIntervalMs`. `SIGINT` stops after the current batch. |
 | `npm run once` | One pass, then exit. Exit code 1 if any stage reported an error. |
 | `npm run once -- --dry-run` | No NEAR or EVM writes, no state writes. Prints what it would report, process and broadcast. |
+| `npm run serve` | HTTP relay only. `POST /v1/execute` submits a wallet-signed action to `execute` on NEAR, paying the gas from the relayer account. Listens on `relay.host`:`relay.port` (default `127.0.0.1:8787`). |
+| `npm run start -- --http` | Watcher loop and the HTTP relay in one process. |
 
 Flags (all optional):
 
 - `--config <path>`: default `config/relayer.json`.
 - `--from-block <n>` / `--to-block <n>`: override the scan range for this run. Works with `--dry-run`.
+- `--http`: with `run`, also serve the HTTP relay in the same process. Not allowed with `--dry-run` (the relay signs real transactions).
 
 Example, read-only scan of the testnet vault:
 
@@ -100,6 +103,7 @@ Config is JSON (see `config/relayer.example.json`). Env overrides for the NEAR s
 | `pollIntervalMs` | Sleep between passes in `run` mode. |
 | `stateDir` | Directory for `<name>.json` cursor files. Default `state`. |
 | `withdrawalLimit` | Page size for the withdrawal views. |
+| `relay` | Optional HTTP relay section. See **HTTP relay** below. Every key has a default. |
 | `fallbackAssets` | Dry-run only. Used if `get_evm_assets` is unavailable. In live mode a failing `get_evm_assets` stops the deposit stage, so nothing is reported against a stale registry. |
 
 State file `state/<name>.json`: `nextBlock` (first block not yet fully processed) and `quarantined`
@@ -186,6 +190,70 @@ Known limitations:
 4. Check with `npm run once -- --dry-run` that the registry and the vault scan look right.
 5. Start the relayer with `npm run start`, or run `npm run once` from cron.
 
+## HTTP relay
+
+Wallet users (EVM or Ed25519) sign an action off-chain. The relay checks the signature and submits
+`execute` for them, so they need no NEAR account or NEAR balance.
+
+Endpoints (all JSON; the frontend calls these from `NEXT_PUBLIC_V4_RELAY_URL`):
+
+| Route | Request | Response |
+| --- | --- | --- |
+| `POST /v1/execute` | `{"contractId":"windswapv4-btb.testnet","method":"execute","args":{"wallet","action","nonce","expires","signature"}}` | `200 {"txHash","result"}`; `result` is the contract's `ActionResult`. Errors: `4xx/5xx {"error":"..."}`. |
+| `GET /v1/health` | | `{"ok":true,"contractId","relayerAccountId"}` |
+| `GET /v1/nonce-hint?wallet=<optional>` | | `{"nonce"}`: a fresh suggestion. Any value unused for that wallet works. |
+
+The bare `args` object (without the envelope) is also accepted.
+
+Request fields, matching the contract's `execute`:
+
+- `wallet`: canonical, `evm:0x` plus 40 lowercase hex, or `ed25519:` plus base58 of a 32-byte key.
+- `action`: one `SignedAction` variant, externally tagged, e.g. `{"Vote":{"token_id":1,"pools":[4,1],"weights":["70","30"]}}`.
+- `nonce`: a JSON number (safe integer), unique per wallet.
+- `expires`: unix seconds, in the future and at most `relay.maxExpirySeconds` ahead.
+- `signature`: EVM `personal_sign` (65 bytes, hex) or Ed25519 over the message bytes (64 bytes, hex or base58).
+
+The signed message is exactly
+`Wind Swap v4 action on <contract> by <wallet> nonce <n> expires <t>: <JSON.stringify(action)>`.
+**Clients must send the action's fields in the Rust declaration order** (listed in
+`src/relay/schema.ts`, from `crates/near-contract/src/lib.rs`). The relay rejects any other order,
+because the contract re-serialises the parsed action and the signature covers that byte string.
+Amounts are decimal strings (U128/U256/I256), not JSON numbers.
+
+Checks run in this order, and nothing reaches NEAR until all of them pass:
+
+1. Per-IP rate limit (429 with `Retry-After`).
+2. Body size (413), JSON, envelope and field shape, and the contract id and method.
+3. `expires`: not in the past, not more than `maxExpirySeconds` ahead (400).
+4. Action schema: variant in `allowedActions` (403 otherwise), exact fields in order, types and ranges.
+5. Wallet canonical form, and the signature over the recomputed message (400).
+6. Idempotency: the same (wallet, nonce) with the same body returns the stored result. A different body is 409.
+7. Per-wallet rate limit (429), then the daily gas budget (503).
+
+Submissions for one wallet are queued one at a time. Each `execute` call runs with 300 TGas and no
+deposit (`near.gasTgas.execute`). A contract panic returns 400 with the panic message. A NEAR RPC
+failure returns 502. A 502 may or may not have executed, but retrying with the same nonce is safe,
+because the contract refuses a nonce that was already used.
+
+Relay config keys (`relay` in the config file; env overrides in brackets):
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `host` | `127.0.0.1` | Bind address [`RELAYER_HTTP_HOST`]. |
+| `port` | `8787` | Port [`RELAYER_HTTP_PORT`]. |
+| `corsOrigins` | `[]` | Exact origins allowed to call from a browser, e.g. `["https://your-frontend.example"]` [`RELAYER_CORS_ORIGINS`, comma-separated]. Empty means no CORS headers. |
+| `trustProxy` | `false` | Read the client IP from the first `X-Forwarded-For` entry. Enable only behind a proxy you control. |
+| `maxBodyBytes` | `16384` | Largest accepted request body. |
+| `maxExpirySeconds` | `86400` | Largest `expires` window. |
+| `allowedActions` | `"*"` | `"*"` or an array of variant names, e.g. `["Vote","Poke","Reset"]`. |
+| `rateLimit.perIp` | `{capacity: 20, refillPerSecond: 0.5}` | Token bucket per client IP. |
+| `rateLimit.perWallet` | `{capacity: 5, refillPerSecond: 0.05}` | Token bucket per wallet, charged only after the signature verifies. |
+| `dailyGasBudgetTgas` | `30000` | Gas the relayer may reserve per UTC day (100 submissions at 300 TGas). Reservations are not refunded. |
+| `idempotencyTtlSeconds` | `86400` | How long a successful (wallet, nonce) result is replayed. |
+
+The frontend points at the relay with `NEXT_PUBLIC_V4_RELAY_URL=https://<host>/v1/execute`.
+Set `relay.corsOrigins` to the frontend origin.
+
 ## Security notes
 
 - **Trust.** In this version the relayer decides which deposits happened. A compromised relayer
@@ -198,6 +266,17 @@ Known limitations:
   deposits would catch most of that. Rate limiting is per process.
 - **Dry-run is read-only.** It makes no NEAR change calls, sends no EVM transactions, and writes no state.
 - **Quarantine.** Rejected deposits need a human decision. Nothing reports them automatically.
+- **Relay pays gas, cannot forge actions.** The relayer account signs only the transaction. It cannot
+  produce a wallet signature, so it can only submit actions users signed. The contract checks the
+  signature, the expiry and the nonce itself, so a compromised relay can delay or drop actions but
+  not alter them. It can still spend the gas budget, so the limits below matter.
+- **Gas budget.** The per-IP and per-wallet limits and `dailyGasBudgetTgas` cap what a caller can
+  cost the relayer. Local checks reject bad signatures, malformed bodies and expired actions before
+  NEAR is called. Schema checks cover types, not business rules: a request that passes but
+  panics on chain (for example, an unknown pool) still spends gas.
+- **Rate limits are per process.** Behind several instances, put the limit in the proxy or a shared store.
+- **Serve in production behind TLS.** The relay speaks plain HTTP. Put it behind a reverse proxy
+  that terminates TLS, and set `trustProxy` only for that proxy.
 
 ## Layout
 
@@ -210,8 +289,12 @@ src/broadcast.ts   pure nonce planner
 src/fees.ts        EIP-1559 fee policy with cap
 src/state.ts       cursor/quarantine persistence (atomic writes)
 src/evm.ts         viem reader (rate-limited) and tx hash helper
-src/near.ts        NEAR views (JSON-RPC) and change calls (near-js)
+src/near.ts        NEAR views (JSON-RPC) and change calls, incl. execute (near-js)
 src/runner.ts      one pass across chains, plus the loop
+src/http.ts        HTTP relay server: routes, body limit, CORS, error mapping
+src/relay/         execute path: service (checks, queue, idempotency), schema (SignedAction
+                   field table), wallet (canonical ids, EVM and Ed25519 verify), limits (token
+                   buckets, daily gas budget), errors
 src/cli.ts         CLI entry point
-tests/             vitest, mocked RPC and NEAR, no network
+tests/             vitest, mocked RPC and NEAR, no network, no real transactions
 ```

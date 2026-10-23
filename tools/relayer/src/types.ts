@@ -107,8 +107,25 @@ export interface ReportDepositArgs {
   amount: string;
 }
 
+/** Arguments of the contract's `execute`, forwarded as received after relay-side checks. */
+export interface ExecuteArgs {
+  wallet: string;
+  action: unknown;
+  nonce: number;
+  expires: number;
+  signature: string;
+}
+
+export interface ExecuteOutcome {
+  txHash: string;
+  /** The contract's `ActionResult`, decoded from the success value. */
+  result?: unknown;
+}
+
 /** Change calls. Only constructed outside dry-run. */
 export interface NearWriter {
+  /** Relays a signed action: functionCall `execute`, 0 deposit. Panics reject with the contract message. */
+  executeAction(args: ExecuteArgs): Promise<ExecuteOutcome>;
   reportEvmDeposit(args: ReportDepositArgs): Promise<boolean>;
   processWithdrawal(args: { id: number; max_fee_per_gas: string; max_priority_fee_per_gas: string }): Promise<void>;
   markWithdrawalBroadcast(args: { id: number; tx_hash: Hex }): Promise<void>;
