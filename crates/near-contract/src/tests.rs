@@ -465,15 +465,15 @@ fn withdraw_works_after_token_is_removed() {
     assert_eq!(balance(&c, ALICE, USDC), 0);
 }
 
-// ---- Upgrade from the deployed layout (ContractV5) ----
+// ---- Upgrade from the deployed layout (ContractV6) ----
 
 #[test]
-fn migrate_reads_deployed_v5_state() {
+fn migrate_reads_deployed_v6_state() {
     set_ctx(OWNER, 1_000);
     let bob_owner = owner_of_account(&acct(BOB));
     let alice_owner = owner_of_account(&acct(ALICE));
     {
-        // Write the deployed (v5) layout, with the same storage prefixes as the testnet contract.
+        // Write the deployed (v6) layout, with the same storage prefixes as the testnet contract.
         let mut legacy_balances = LookupMap::new(StorageKey::Balances);
         legacy_balances.insert((acct(ALICE), USDC.to_string()), 42u128);
         let mut balances = LookupMap::new(StorageKey::OwnerBalances);
@@ -505,7 +505,8 @@ fn migrate_reads_deployed_v5_state() {
                 signing_nonce: None,
             },
         );
-        let old = ContractV5 {
+        let (ve, voter, minter, distributor) = tokenomics::fresh_state(&acct(OWNER), 1_000, 1_000);
+        let old = ContractV6 {
             owner: acct(OWNER),
             fee_config: FeeConfig::default(),
             pools: IterableMap::new(StorageKey::Pools),
@@ -524,7 +525,23 @@ fn migrate_reads_deployed_v5_state() {
             evm_asset_by_token: LookupMap::new(StorageKey::EvmAssetByToken),
             evm_chains: LookupMap::new(StorageKey::EvmChains),
             evm_deposits: LookupSet::new(StorageKey::EvmDeposits),
+            evm_deposits_by_asset: LookupSet::new(StorageKey::EvmDepositsByAsset),
             has_state: LookupSet::new(StorageKey::HasState),
+            wind_token: None,
+            ve: LazyOption::new(StorageKey::Ve, Some(ve)),
+            voter: LazyOption::new(StorageKey::Voter, Some(voter)),
+            minter: LazyOption::new(StorageKey::Minter, Some(minter)),
+            distributor: LazyOption::new(StorageKey::Distributor, Some(distributor)),
+            gauges: LookupMap::new(StorageKey::Gauges),
+            stakes: LookupMap::new(StorageKey::Stakes),
+            nft_manager: LazyOption::new(
+                StorageKey::NftManager,
+                Some(PositionManager::new(tokenomics::nft_manager_account())),
+            ),
+            wind_genesis_done: false,
+            wind_genesis_pending: false,
+            wind_minted: 0,
+            pending_epoch: None,
         };
         env::state_write(&old);
     }

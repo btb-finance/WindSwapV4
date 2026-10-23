@@ -58,6 +58,7 @@ use windswap_engine::ve::VotingEscrow;
 use windswap_engine::voter::{GaugeId, PoolId, Voter, DURATION as VOTE_DURATION};
 use windswap_engine::U256;
 
+use crate::accounting::Flow;
 use crate::accounts::{owner_hex, owner_of_account, parse_owner_hex, Owner};
 use crate::{now, now_secs, ok, to_u128, Contract, ContractExt};
 
@@ -479,6 +480,8 @@ impl Contract {
             let (c0, c1) = ok(pool.collect(owner, tick_lower, tick_upper, u128::MAX, u128::MAX));
             (c0, c1)
         };
+        self.reserve_out(Flow::Stake, pool_id, &token0, collected0);
+        self.reserve_out(Flow::Stake, pool_id, &token1, collected1);
         let spacing = self.pool_ref(pool_id).tick_spacing;
         let (token_id, minted0, minted1) = {
             let pool = self
@@ -503,6 +506,8 @@ impl Contract {
             ));
             (id, to_u128(a0), to_u128(a1))
         };
+        self.reserve_in(Flow::Stake, pool_id, &token0, minted0);
+        self.reserve_in(Flow::Stake, pool_id, &token1, minted1);
         net_settle(self, &owner, &token0, collected0, minted0);
         net_settle(self, &owner, &token1, collected1, minted1);
         // The gauge pulls the NFT from its owner, so the owner approves the gauge for this call only.
@@ -525,6 +530,8 @@ impl Contract {
             ok_dbg(gauge.deposit(pool, nft, owner, token_id, time))
         };
         self.set_nft_approval(owner, gauge_acc, false);
+        self.reserve_out(Flow::Stake, pool_id, &token0, deposit0);
+        self.reserve_out(Flow::Stake, pool_id, &token1, deposit1);
         self.credit(&owner, &token0, deposit0);
         self.credit(&owner, &token1, deposit1);
         self.stakes.insert(key, token_id);
@@ -571,6 +578,9 @@ impl Contract {
             let (w0, w1, reward) = ok_dbg(gauge.withdraw(pool, nft, owner, token_id, time));
             (w0, w1, to_u128(reward))
         };
+        self.reserve_out(Flow::Unstake, pool_id, &token0, w0);
+        self.reserve_out(Flow::Unstake, pool_id, &token1, w1);
+        self.reserve_out(Flow::Unstake, pool_id, &wind, reward);
         self.credit(&owner, &wind, reward);
         let (liquidity, stake_acc) = {
             let nft = self
@@ -588,6 +598,10 @@ impl Contract {
             let (m0, m1) = ok(pool.mint(owner, tick_lower, tick_upper, liquidity, time));
             (p0, p1, to_u128(m0), to_u128(m1))
         };
+        self.reserve_out(Flow::Unstake, pool_id, &token0, p0);
+        self.reserve_out(Flow::Unstake, pool_id, &token1, p1);
+        self.reserve_in(Flow::Unstake, pool_id, &token0, m0);
+        self.reserve_in(Flow::Unstake, pool_id, &token1, m1);
         net_settle(self, &owner, &token0, w0 + p0, m0);
         net_settle(self, &owner, &token1, w1 + p1, m1);
     }
@@ -625,6 +639,7 @@ impl Contract {
                 gauge.get_reward_token(pool, nft, owner, token_id, time),
             ))
         };
+        self.reserve_out(Flow::EmissionOut, pool_id, &wind, reward);
         self.credit(&owner, &wind, reward);
         reward
     }
@@ -840,7 +855,10 @@ impl Contract {
         self.gauges.insert(pool, gauge_state);
         self.pools.insert(pool, pool_state);
         self.debit(&voter_id(), &wind, amount);
+        self.reserve_in(Flow::EmissionIn, pool, &wind, amount);
         let (fees0, fees1) = (to_u128(fees0), to_u128(fees1));
+        self.reserve_out(Flow::FeesOut, pool, &token0, fees0);
+        self.reserve_out(Flow::FeesOut, pool, &token1, fees1);
         {
             let voter = self.voter_mut();
             voter.claimable.remove(&gauge);

@@ -60,6 +60,7 @@
 //! - Wallet linking: `link_wallet` refuses a wallet whose own owner id holds balances or
 //!   positions (`has_state`), so no balance can become unreachable after linking.
 
+mod accounting;
 mod evm;
 mod tokenomics;
 
@@ -77,6 +78,7 @@ use windswap_engine::pool::cl_pool::ClPool;
 use windswap_engine::router::{Hop, Router};
 use windswap_engine::{I256, U256};
 
+use accounting::{Flow, HopFlow};
 use accounts::{
     action_message, engine_id_for, owner_hex, owner_of_account, parse_owner_hex, parse_signature,
     verify_wallet_signature, LinkRegistry, LinkRequest, Owner, WalletId,
@@ -125,6 +127,14 @@ enum StorageKey {
     Stakes,
     /// The NFT manager of the staked positions.
     NftManager,
+    // Appended in v7 (solvency accounting). See `accounting`.
+    Liabilities,
+    Accounted,
+    PoolReserves,
+    ReserveTotals,
+    ReservesSeeded,
+    PendingOwed,
+    Unbacked,
 }
 
 #[near(contract_state)]
@@ -192,12 +202,32 @@ pub struct Contract {
     wind_minted: u128,
     /// The epoch whose mint is in flight, if any. See `tokenomics`.
     pending_epoch: Option<PendingEpoch>,
+    // Appended in v7 (solvency accounting). See `accounting` for what each total covers.
+    /// Per token: sum of the internal balances that are counted (see `accounting`).
+    liabilities: LookupMap<String, u128>,
+    /// `(owner, token)` keys whose balance is already in `liabilities`. Used only if `needs_seed`.
+    accounted: LookupSet<(Owner, String)>,
+    /// True on a migrated contract: balances are counted on first touch, and the owner seeds
+    /// the rest. False on a fresh deployment, which counts every change from the start.
+    needs_seed: bool,
+    /// Per `(pool, token)`: tokens held for the pool, its gauge and its NFT manager. Signed, so
+    /// a missing seed shows up as a negative reserve instead of a panic in a swap.
+    pool_reserves: LookupMap<(u64, String), i128>,
+    /// Per token: the sum of `pool_reserves` over the pools.
+    reserve_totals: LookupMap<String, i128>,
+    /// `(pool, token)` pairs whose reserve was set by `seed_pool_reserves`.
+    reserves_seeded: LookupSet<(u64, String)>,
+    /// Per token: EVM withdrawals that are debited but not yet broadcast.
+    pending_withdrawals: LookupMap<String, u128>,
+    /// Per token: faucet credit (`test_credit`) that no deposit backs.
+    unbacked: LookupMap<String, u128>,
 }
 
-/// State layout of the deployed testnet contract (v5): the `Contract` struct before the ve(3,3)
-/// state. Only used by `migrate`. Field order and types must match the deployed state exactly.
+/// State layout of the deployed testnet contract (v6): the `Contract` struct before the solvency
+/// accounting fields. Only used by `migrate`. Field order and types must match the deployed state
+/// exactly.
 #[near(serializers = [borsh])]
-struct ContractV5 {
+struct ContractV6 {
     owner: AccountId,
     fee_config: FeeConfig,
     pools: IterableMap<u64, ClPool>,
@@ -216,7 +246,20 @@ struct ContractV5 {
     evm_asset_by_token: LookupMap<String, String>,
     evm_chains: LookupMap<u64, EvmChain>,
     evm_deposits: LookupSet<(u64, [u8; 32], u32)>,
+    evm_deposits_by_asset: LookupSet<(u64, [u8; 32], u32, String)>,
     has_state: LookupSet<Owner>,
+    wind_token: Option<AccountId>,
+    ve: LazyOption<VotingEscrow>,
+    voter: LazyOption<Voter>,
+    minter: LazyOption<Minter>,
+    distributor: LazyOption<RewardsDistributor>,
+    gauges: LookupMap<u64, ClGauge>,
+    stakes: LookupMap<StakeKey, U256>,
+    nft_manager: LazyOption<PositionManager>,
+    wind_genesis_done: bool,
+    wind_genesis_pending: bool,
+    wind_minted: u128,
+    pending_epoch: Option<PendingEpoch>,
 }
 
 #[derive(Clone)]
@@ -811,6 +854,7 @@ impl Contract {
             .unwrap_or(0)
     }
 
+    /// The only writer of a credited balance. Also updates `liabilities` (see `accounting`).
     fn credit(&mut self, owner: &Owner, token: &str, amount: u128) {
         if amount == 0 {
             return;
@@ -821,9 +865,11 @@ impl Contract {
         let next = current
             .checked_add(amount)
             .unwrap_or_else(|| env::panic_str("balance overflow"));
+        self.liability_add(&key, current, amount);
         self.balances.insert(key, next);
     }
 
+    /// The only writer of a debited balance. Also updates `liabilities` (see `accounting`).
     fn debit(&mut self, owner: &Owner, token: &str, amount: u128) {
         if amount == 0 {
             return;
@@ -835,6 +881,7 @@ impl Contract {
                 "insufficient {token} balance: have {current}, need {amount}"
             ))
         });
+        self.liability_sub(&key, current, amount);
         if next == 0 {
             self.balances.remove(&key);
         } else {
@@ -900,6 +947,10 @@ impl Contract {
 
     /// Engine exact-input route on `pools`. Returns the engine error without panicking, so a
     /// caller can show that a failed route leaves the stored pools unchanged.
+    ///
+    /// The hops run one at a time through the engine's single-hop `Router::exact_input`, which
+    /// is what the multi-hop call does internally. Each hop's amounts are returned, so the
+    /// reserve of each pool can be updated. The output and the slippage check are the same.
     fn route_exact_input(
         &self,
         route: &Route,
@@ -907,17 +958,33 @@ impl Contract {
         trader: [u8; 32],
         amount_in: u128,
         min_out: u128,
-    ) -> EngineResult<U256> {
-        Router {
-            store: pools,
-            fees: &self.fee_config,
-            trader,
-            time: now(),
+    ) -> EngineResult<Vec<HopFlow>> {
+        let mut flows = Vec::with_capacity(route.hops.len());
+        let mut amount = U256::from(amount_in);
+        for hop in &route.hops {
+            let out = Router {
+                store: &mut *pools,
+                fees: &self.fee_config,
+                trader,
+                time: now(),
+            }
+            .exact_input(std::slice::from_ref(hop), amount, U256::ZERO)?;
+            flows.push(HopFlow {
+                pool_id: hop.pool_id,
+                zero_for_one: hop.zero_for_one,
+                paid: amount,
+                received: out,
+            });
+            amount = out;
         }
-        .exact_input(&route.hops, U256::from(amount_in), U256::from(min_out))
+        if amount < U256::from(min_out) {
+            return Err(windswap_engine::MathError::TooLittleReceived);
+        }
+        Ok(flows)
     }
 
-    /// Engine exact-output route on `pools`. See `route_exact_input`.
+    /// Engine exact-output route on `pools`. See `route_exact_input`. The hops run back to front,
+    /// and each hop must deliver exactly what the next one needs, as in the multi-hop call.
     fn route_exact_output(
         &self,
         route: &Route,
@@ -925,14 +992,45 @@ impl Contract {
         trader: [u8; 32],
         amount_out: u128,
         max_in: u128,
-    ) -> EngineResult<U256> {
-        Router {
-            store: pools,
-            fees: &self.fee_config,
-            trader,
-            time: now(),
+    ) -> EngineResult<Vec<HopFlow>> {
+        let mut flows = Vec::with_capacity(route.hops.len());
+        let mut needed = U256::from(amount_out);
+        for hop in route.hops.iter().rev() {
+            let paid = Router {
+                store: &mut *pools,
+                fees: &self.fee_config,
+                trader,
+                time: now(),
+            }
+            .exact_output(std::slice::from_ref(hop), needed, U256::MAX)?;
+            flows.push(HopFlow {
+                pool_id: hop.pool_id,
+                zero_for_one: hop.zero_for_one,
+                paid,
+                received: needed,
+            });
+            needed = paid;
         }
-        .exact_output(&route.hops, U256::from(amount_out), U256::from(max_in))
+        if needed > U256::from(max_in) {
+            return Err(windswap_engine::MathError::TooMuchRequested);
+        }
+        flows.reverse();
+        Ok(flows)
+    }
+
+    /// Applies the pool side of a route's hops: each hop's input enters its pool, and its output
+    /// leaves it. Intermediate tokens net to zero across the route.
+    fn route_reserves(&mut self, flows: &[HopFlow]) {
+        for flow in flows {
+            let (token0, token1) = self.tokens_of(flow.pool_id);
+            let (token_in, token_out) = if flow.zero_for_one {
+                (token0, token1)
+            } else {
+                (token1, token0)
+            };
+            self.reserve_in(Flow::Swap, flow.pool_id, &token_in, to_u128(flow.paid));
+            self.reserve_out(Flow::Swap, flow.pool_id, &token_out, to_u128(flow.received));
+        }
     }
 
     /// Writes the working copies of a successful route back to the pool storage.
@@ -966,6 +1064,8 @@ impl Contract {
         };
         self.settle(&owner, &token0, result.amount0);
         self.settle(&owner, &token1, result.amount1);
+        self.reserve_flow(Flow::Swap, pool_id, &token0, result.amount0);
+        self.reserve_flow(Flow::Swap, pool_id, &token1, result.amount1);
         [result.amount0.to_string(), result.amount1.to_string()]
     }
 
@@ -978,10 +1078,11 @@ impl Contract {
     ) -> u128 {
         let route = self.resolve_path(&path);
         let mut pools = self.working_pools(&route.hops);
-        let out = ok(self.route_exact_input(&route, &mut pools, owner, amount_in, min_out));
-        let out = to_u128(out);
+        let flows = ok(self.route_exact_input(&route, &mut pools, owner, amount_in, min_out));
+        let out = to_u128(flows.last().map(|f| f.received).unwrap_or_default());
         self.debit(&owner, &route.token_in, amount_in);
         self.credit(&owner, &route.token_out, out);
+        self.route_reserves(&flows);
         self.write_back(pools);
         out
     }
@@ -995,10 +1096,11 @@ impl Contract {
     ) -> u128 {
         let route = self.resolve_path(&path);
         let mut pools = self.working_pools(&route.hops);
-        let paid = ok(self.route_exact_output(&route, &mut pools, owner, amount_out, max_in));
-        let paid = to_u128(paid);
+        let flows = ok(self.route_exact_output(&route, &mut pools, owner, amount_out, max_in));
+        let paid = to_u128(flows.first().map(|f| f.paid).unwrap_or_default());
         self.debit(&owner, &route.token_in, paid);
         self.credit(&owner, &route.token_out, amount_out);
+        self.route_reserves(&flows);
         self.write_back(pools);
         paid
     }
@@ -1019,9 +1121,13 @@ impl Contract {
         };
         self.debit(&owner, &token0, to_u128(amount0));
         self.debit(&owner, &token1, to_u128(amount1));
+        self.reserve_in(Flow::Mint, pool_id, &token0, to_u128(amount0));
+        self.reserve_in(Flow::Mint, pool_id, &token1, to_u128(amount1));
         [amount0.to_string(), amount1.to_string()]
     }
 
+    /// Moves liquidity into owed amounts inside the pool. No token leaves the pool, so no
+    /// reserve changes here (see `accounting`).
     fn burn_for(
         &mut self,
         owner: Owner,
@@ -1052,6 +1158,8 @@ impl Contract {
         };
         self.credit(&owner, &token0, amount0);
         self.credit(&owner, &token1, amount1);
+        self.reserve_out(Flow::Collect, pool_id, &token0, amount0);
+        self.reserve_out(Flow::Collect, pool_id, &token1, amount1);
         [U128(amount0), U128(amount1)]
     }
 
@@ -1073,6 +1181,7 @@ impl Contract {
         let to_address = evm::parse_address(to_address).unwrap_or_else(|e| env::panic_str(&e));
 
         self.debit(&owner, token_id, amount);
+        self.pending_add(token_id, amount);
         let id = self.next_withdrawal_id;
         self.next_withdrawal_id = id
             .checked_add(1)
@@ -1317,28 +1426,33 @@ impl Contract {
             wind_genesis_pending: false,
             wind_minted: 0,
             pending_epoch: None,
+            liabilities: LookupMap::new(StorageKey::Liabilities),
+            accounted: LookupSet::new(StorageKey::Accounted),
+            needs_seed: false,
+            pool_reserves: LookupMap::new(StorageKey::PoolReserves),
+            reserve_totals: LookupMap::new(StorageKey::ReserveTotals),
+            reserves_seeded: LookupSet::new(StorageKey::ReservesSeeded),
+            pending_withdrawals: LookupMap::new(StorageKey::PendingOwed),
+            unbacked: LookupMap::new(StorageKey::Unbacked),
         }
     }
 
-    /// Upgrade from the deployed testnet state (v5, the layout before the ve(3,3) state) to v6.
-    /// Run once, as the init call of the redeploy:
+    /// Upgrade from the deployed testnet state (v6: the ve(3,3) layout) to v7 (solvency
+    /// accounting). Run once, as the init call of the redeploy:
     /// `near contract deploy <acct> use-file <wasm> with-init-call migrate json-args '{}'`.
     ///
-    /// Everything in v5 is kept (balances, pools, withdrawals, bridge state). The v5 balances
-    /// cannot be copied here (a `LookupMap` cannot be iterated), so they stay where they are, as
-    /// before. The ve(3,3) state starts fresh at the migration time: no locks, no gauges, no WIND
-    /// token (set it with `set_wind_token`), and no minted supply. Owners that already hold balances
-    /// under their own wallet id are not known to this call (see `flag_wallet_state`).
+    /// Everything in v6 is kept. The v6 balances and pool reserves cannot be summed here (a
+    /// `LookupMap` cannot be iterated, and pool reserves are not stored), so the owner seeds them
+    /// with `seed_accounting` and `seed_pool_reserves`. Until then `get_token_accounting` reports
+    /// `migrated: true` and totals that are incomplete. The pending EVM withdrawals are summed here.
     /// Only the contract account can call it (`#[private]`).
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
-        let old: ContractV5 =
+        let old: ContractV6 =
             env::state_read().unwrap_or_else(|| env::panic_str("no contract state to migrate"));
-        let (ve, voter, minter, distributor) =
-            tokenomics::fresh_state(&old.owner, now_secs(), env::block_height());
-        let nft_manager = PositionManager::new(tokenomics::nft_manager_account());
-        Self {
+        let next_withdrawal_id = old.next_withdrawal_id;
+        let mut contract = Self {
             owner: old.owner,
             fee_config: old.fee_config,
             pools: old.pools,
@@ -1357,21 +1471,42 @@ impl Contract {
             evm_asset_by_token: old.evm_asset_by_token,
             evm_chains: old.evm_chains,
             evm_deposits: old.evm_deposits,
-            evm_deposits_by_asset: LookupSet::new(StorageKey::EvmDepositsByAsset),
+            evm_deposits_by_asset: old.evm_deposits_by_asset,
             has_state: old.has_state,
-            wind_token: None,
-            ve: LazyOption::new(StorageKey::Ve, Some(ve)),
-            voter: LazyOption::new(StorageKey::Voter, Some(voter)),
-            minter: LazyOption::new(StorageKey::Minter, Some(minter)),
-            distributor: LazyOption::new(StorageKey::Distributor, Some(distributor)),
-            gauges: LookupMap::new(StorageKey::Gauges),
-            stakes: LookupMap::new(StorageKey::Stakes),
-            nft_manager: LazyOption::new(StorageKey::NftManager, Some(nft_manager)),
-            wind_genesis_done: false,
-            wind_genesis_pending: false,
-            wind_minted: 0,
-            pending_epoch: None,
+            wind_token: old.wind_token,
+            ve: old.ve,
+            voter: old.voter,
+            minter: old.minter,
+            distributor: old.distributor,
+            gauges: old.gauges,
+            stakes: old.stakes,
+            nft_manager: old.nft_manager,
+            wind_genesis_done: old.wind_genesis_done,
+            wind_genesis_pending: old.wind_genesis_pending,
+            wind_minted: old.wind_minted,
+            pending_epoch: old.pending_epoch,
+            liabilities: LookupMap::new(StorageKey::Liabilities),
+            accounted: LookupSet::new(StorageKey::Accounted),
+            needs_seed: true,
+            pool_reserves: LookupMap::new(StorageKey::PoolReserves),
+            reserve_totals: LookupMap::new(StorageKey::ReserveTotals),
+            reserves_seeded: LookupSet::new(StorageKey::ReservesSeeded),
+            pending_withdrawals: LookupMap::new(StorageKey::PendingOwed),
+            unbacked: LookupMap::new(StorageKey::Unbacked),
+        };
+        // Withdrawals not yet broadcast are still owed. They are few, and the ids are sequential.
+        for id in 0..next_withdrawal_id {
+            let Some(w) = contract.withdrawals.get(&id).cloned() else {
+                continue;
+            };
+            if matches!(
+                w.status,
+                WithdrawalStatus::Pending | WithdrawalStatus::Signed { .. }
+            ) {
+                contract.pending_add(&w.token_id, w.amount);
+            }
         }
+        contract
     }
 
     /// Owner only. Moves the v3 balances of the listed `(account, token)` pairs to their owner
@@ -1627,6 +1762,7 @@ impl Contract {
     pub fn test_credit(&mut self, account_id: AccountId, token: String, amount: U128) {
         self.assert_owner();
         self.credit(&owner_of_account(&account_id), &token, amount.0);
+        self.unbacked_add(&token, amount.0);
     }
 
     /// Adds liquidity for the caller. Debits the caller's internal balances for the token
@@ -1755,8 +1891,10 @@ impl Contract {
     pub fn quote_exact_input(&self, path: Vec<HopInput>, amount_in: U128) -> U128 {
         let route = self.resolve_path(&path);
         let mut pools = self.working_pools(&route.hops);
-        let out = ok(self.route_exact_input(&route, &mut pools, QUOTE_TRADER, amount_in.0, 0));
-        U128(to_u128(out))
+        let flows = ok(self.route_exact_input(&route, &mut pools, QUOTE_TRADER, amount_in.0, 0));
+        U128(to_u128(
+            flows.last().map(|f| f.received).unwrap_or_default(),
+        ))
     }
 
     /// Input that `swap_exact_output` would debit for `path` and `amount_out`, at the current
@@ -1764,9 +1902,9 @@ impl Contract {
     pub fn quote_exact_output(&self, path: Vec<HopInput>, amount_out: U128) -> U128 {
         let route = self.resolve_path(&path);
         let mut pools = self.working_pools(&route.hops);
-        let paid =
+        let flows =
             ok(self.route_exact_output(&route, &mut pools, QUOTE_TRADER, amount_out.0, u128::MAX));
-        U128(to_u128(paid))
+        U128(to_u128(flows.first().map(|f| f.paid).unwrap_or_default()))
     }
 
     /// Owner only. Enables a tick spacing with its swap fee, in hundredths of a bip. Pools
@@ -2307,6 +2445,7 @@ impl Contract {
                     ));
                 } else {
                     w.status = WithdrawalStatus::Failed { nonce };
+                    self.pending_sub(&token_id, w.amount);
                     self.credit(&w.owner, &token_id, w.amount);
                     env::log_str(&format!(
                         "withdrawal {id} failed ({reason}); nonce {nonce} is a gap, balance credited back"
@@ -2332,6 +2471,7 @@ impl Contract {
             WithdrawalStatus::Signed { nonce, .. } => nonce,
             _ => env::panic_str(&format!("withdrawal {id} is not signed")),
         };
+        self.pending_sub(&w.token_id, w.amount);
         w.status = WithdrawalStatus::Broadcast {
             nonce,
             tx_hash: evm::hex_0x(&hash),
@@ -2380,6 +2520,8 @@ impl Contract {
     }
 }
 
+#[cfg(test)]
+mod accounting_tests;
 pub mod accounts;
 #[cfg(test)]
 mod accounts_tests;
