@@ -8,42 +8,44 @@ use crate::accounts::{
 
 const NOW: u64 = 1_900_000_000;
 const EXPIRES: u64 = NOW + 600;
+/// The contract account the link messages are bound to.
+pub(crate) const CONTRACT: &str = "windswapv4-btb.testnet";
 
 /// Hardhat / Anvil default account #0. Its address is well known, so it checks address derivation.
-const HARDHAT_KEY: [u8; 32] = [
+pub(crate) const HARDHAT_KEY: [u8; 32] = [
     0xac, 0x09, 0x74, 0xbe, 0xc3, 0x9a, 0x17, 0xe3, 0x6b, 0xa4, 0xa6, 0xb4, 0xd2, 0x38, 0xff, 0x94,
     0x4b, 0xac, 0xb4, 0x78, 0xcb, 0xed, 0x5e, 0xfc, 0xae, 0x78, 0x4d, 0x7b, 0xf4, 0xf2, 0xff, 0x80,
 ];
-const HARDHAT_ADDRESS: [u8; 20] = [
+pub(crate) const HARDHAT_ADDRESS: [u8; 20] = [
     0xf3, 0x9f, 0xd6, 0xe5, 0x1a, 0xad, 0x88, 0xf6, 0xf4, 0xce, 0x6a, 0xb8, 0x82, 0x72, 0x79, 0xcf,
     0xff, 0xb9, 0x22, 0x66,
 ];
 
 /// Curve order n, big-endian.
-const SECP256K1_ORDER: [u8; 32] = [
+pub(crate) const SECP256K1_ORDER: [u8; 32] = [
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe,
     0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b, 0xbf, 0xd2, 0x5e, 0x8c, 0xd0, 0x36, 0x41, 0x41,
 ];
 
-fn account(s: &str) -> AccountId {
+pub(crate) fn account(s: &str) -> AccountId {
     s.parse().unwrap()
 }
 
-fn sk(seed: u8) -> SigningKey {
+pub(crate) fn sk(seed: u8) -> SigningKey {
     let mut bytes = [0u8; 32];
     bytes[31] = seed;
     bytes[0] = 0x11;
     SigningKey::from_slice(&bytes).unwrap()
 }
 
-fn evm_address(sk: &SigningKey) -> [u8; 20] {
+pub(crate) fn evm_address(sk: &SigningKey) -> [u8; 20] {
     let point = sk.verifying_key().to_encoded_point(false);
     let hash = env::keccak256_array(&point.as_bytes()[1..]);
     hash[12..].try_into().unwrap()
 }
 
 /// EIP-191 `personal_sign`, written out independently of the crate's own helper.
-fn evm_sign(sk: &SigningKey, msg: &str) -> [u8; 65] {
+pub(crate) fn evm_sign(sk: &SigningKey, msg: &str) -> [u8; 65] {
     let mut data = format!("\x19Ethereum Signed Message:\n{}", msg.len()).into_bytes();
     data.extend_from_slice(msg.as_bytes());
     let digest = env::keccak256_array(&data);
@@ -55,7 +57,7 @@ fn evm_sign(sk: &SigningKey, msg: &str) -> [u8; 65] {
 }
 
 /// Same signature with `s` replaced by `n - s` and the recovery id flipped: valid but malleable.
-fn high_s(sig: &[u8; 65]) -> [u8; 65] {
+pub(crate) fn high_s(sig: &[u8; 65]) -> [u8; 65] {
     let mut out = *sig;
     let mut borrow = 0i16;
     for i in (0..32).rev() {
@@ -73,15 +75,15 @@ fn high_s(sig: &[u8; 65]) -> [u8; 65] {
     out
 }
 
-fn evm_wallet(sk: &SigningKey) -> WalletId {
+pub(crate) fn evm_wallet(sk: &SigningKey) -> WalletId {
     WalletId::Evm(evm_address(sk))
 }
 
-fn evm_request(sk: &SigningKey, acct: &str, nonce: u64, expires: u64) -> LinkRequest {
+pub(crate) fn evm_request(sk: &SigningKey, acct: &str, nonce: u64, expires: u64) -> LinkRequest {
     LinkRequest {
         wallet: evm_wallet(sk),
         account: account(acct),
-        chain_id: "testnet".to_string(),
+        contract: account(CONTRACT),
         nonce,
         expires,
     }
@@ -177,13 +179,13 @@ fn link_message_has_exact_format() {
     let msg = link_message(
         &WalletId::Evm(HARDHAT_ADDRESS),
         &account("alice.testnet"),
-        "testnet",
+        &account(CONTRACT),
         3,
         1_900_000_600,
     );
     assert_eq!(
         msg,
-        "Wind Swap v4: link wallet evm:0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266 to account alice.testnet on testnet nonce 3 expires 1900000600"
+        "Wind Swap v4: link wallet evm:0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266 to account alice.testnet on windswapv4-btb.testnet nonce 3 expires 1900000600"
     );
 }
 
@@ -195,7 +197,7 @@ fn evm_signature_verifies_for_its_address() {
     let msg = link_message(
         &evm_wallet(&key),
         &account("alice.testnet"),
-        "testnet",
+        &account(CONTRACT),
         1,
         EXPIRES,
     );
@@ -285,9 +287,13 @@ fn evm_known_vector_hardhat_account_0() {
     let msg = link_message(
         &WalletId::Evm(HARDHAT_ADDRESS),
         &account("alice.testnet"),
-        "testnet",
+        &account(CONTRACT),
         1,
         1_900_000_600,
+    );
+    assert_eq!(
+        msg,
+        "Wind Swap v4: link wallet evm:0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266 to account alice.testnet on windswapv4-btb.testnet nonce 1 expires 1900000600"
     );
     let sig = evm_sign(&key, &msg);
     // Our signer emits v in {0,1}; viem emits 27/28. Same r||s, same signer.
@@ -299,9 +305,9 @@ fn evm_known_vector_hardhat_account_0() {
     assert!(verify_evm_link(&msg, &fixed, HARDHAT_ADDRESS));
 }
 
-/// personal_sign of `link_message(evm wallet of HARDHAT_KEY, alice.testnet, testnet, 1, 1_900_000_600)`
+/// personal_sign of `link_message(evm wallet of HARDHAT_KEY, alice.testnet, windswapv4-btb.testnet, 1, 1_900_000_600)`
 /// by the Hardhat account #0 key, as produced by viem's `signMessage` (v = 27/28).
-const KNOWN_VECTOR_SIG_HEX: &str = "5a1954491046e4d6aea1c976ae53e841e77da501750275f8067972cd105e04da23aad65d1175d2a60a9e569dfd61fdb3276b3a7d9591ccab73555835978e7b341c";
+const KNOWN_VECTOR_SIG_HEX: &str = "5537d438a78cace1560349d0ec1baeaf49f3d79b444935bcac6d361cb4662d4840c16655c0880aaae536592a72434a6c05d17575bf362d5789ddd8b2ee7e4b431c";
 
 fn hex_to_65(s: &str) -> [u8; 65] {
     let mut out = [0u8; 65];
@@ -311,7 +317,7 @@ fn hex_to_65(s: &str) -> [u8; 65] {
     out
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -326,7 +332,7 @@ fn ed25519_sign_verify_and_tamper() {
     let msg = link_message(
         &WalletId::Ed25519(pk),
         &account("alice.testnet"),
-        "testnet",
+        &account(CONTRACT),
         1,
         EXPIRES,
     );
@@ -350,7 +356,7 @@ fn registry_links_evm_wallet_and_resolves_to_account() {
     let key = sk(20);
     let req = evm_request(&key, "alice.testnet", 1, EXPIRES);
     let sig = evm_sign(&key, &req.message());
-    let mut reg = LinkRegistry::new();
+    let mut reg = LinkRegistry::new("test");
     reg.link(&req, WalletSignature::Evm(&sig), NOW).unwrap();
 
     let alice_id = env::sha256_array(b"alice.testnet");
@@ -363,7 +369,7 @@ fn registry_links_evm_wallet_and_resolves_to_account() {
 
 #[test]
 fn registry_unlinked_wallet_resolves_to_its_own_id() {
-    let reg = LinkRegistry::new();
+    let reg = LinkRegistry::new("test");
     let w = WalletId::Ed25519([3u8; 32]);
     assert_eq!(reg.resolve(&w), engine_id_for(&w));
 }
@@ -371,14 +377,14 @@ fn registry_unlinked_wallet_resolves_to_its_own_id() {
 #[test]
 fn registry_near_wallet_resolves_to_engine_account_and_cannot_be_linked() {
     let near = WalletId::Near(account("alice.testnet"));
-    let reg = LinkRegistry::new();
+    let reg = LinkRegistry::new("test");
     assert_eq!(reg.resolve(&near), env::sha256_array(b"alice.testnet"));
 
-    let mut reg = LinkRegistry::new();
+    let mut reg = LinkRegistry::new("test");
     let req = LinkRequest {
         wallet: near,
         account: account("bob.testnet"),
-        chain_id: "testnet".into(),
+        contract: account(CONTRACT),
         nonce: 1,
         expires: EXPIRES,
     };
@@ -392,7 +398,7 @@ fn registry_near_wallet_resolves_to_engine_account_and_cannot_be_linked() {
 #[test]
 fn registry_rejects_double_link_to_another_account() {
     let key = sk(21);
-    let mut reg = LinkRegistry::new();
+    let mut reg = LinkRegistry::new("test");
 
     let req_a = evm_request(&key, "alice.testnet", 1, EXPIRES);
     let sig_a = evm_sign(&key, &req_a.message());
@@ -413,7 +419,7 @@ fn registry_rejects_double_link_to_another_account() {
 #[test]
 fn registry_relink_to_same_account_is_noop() {
     let key = sk(22);
-    let mut reg = LinkRegistry::new();
+    let mut reg = LinkRegistry::new("test");
     let req = evm_request(&key, "alice.testnet", 1, EXPIRES);
     let sig = evm_sign(&key, &req.message());
     reg.link(&req, WalletSignature::Evm(&sig), NOW).unwrap();
@@ -428,7 +434,7 @@ fn registry_relink_to_same_account_is_noop() {
 #[test]
 fn registry_rejects_expired_request() {
     let key = sk(23);
-    let mut reg = LinkRegistry::new();
+    let mut reg = LinkRegistry::new("test");
     let req = evm_request(&key, "alice.testnet", 1, NOW - 1);
     let sig = evm_sign(&key, &req.message());
     assert_eq!(
@@ -445,7 +451,7 @@ fn registry_rejects_expired_request() {
 #[test]
 fn registry_rejects_nonce_replay_even_after_unlink() {
     let key = sk(24);
-    let mut reg = LinkRegistry::new();
+    let mut reg = LinkRegistry::new("test");
     let req = evm_request(&key, "alice.testnet", 7, EXPIRES);
     let sig = evm_sign(&key, &req.message());
     reg.link(&req, WalletSignature::Evm(&sig), NOW).unwrap();
@@ -461,7 +467,7 @@ fn registry_rejects_nonce_replay_even_after_unlink() {
 #[test]
 fn registry_rejects_signature_for_different_request() {
     let key = sk(25);
-    let mut reg = LinkRegistry::new();
+    let mut reg = LinkRegistry::new("test");
     let signed_for = evm_request(&key, "alice.testnet", 1, EXPIRES);
     let sig = evm_sign(&key, &signed_for.message());
     let claimed = evm_request(&key, "bob.testnet", 1, EXPIRES);
@@ -475,7 +481,7 @@ fn registry_rejects_signature_for_different_request() {
 fn registry_rejects_wallet_signature_of_wrong_key() {
     let key = sk(26);
     let imposter = sk(27);
-    let mut reg = LinkRegistry::new();
+    let mut reg = LinkRegistry::new("test");
     let req = evm_request(&key, "alice.testnet", 1, EXPIRES);
     let sig = evm_sign(&imposter, &req.message());
     assert_eq!(
@@ -487,7 +493,7 @@ fn registry_rejects_wallet_signature_of_wrong_key() {
 #[test]
 fn registry_rejects_mismatched_signature_type() {
     let key = sk(28);
-    let mut reg = LinkRegistry::new();
+    let mut reg = LinkRegistry::new("test");
     let req = evm_request(&key, "alice.testnet", 1, EXPIRES);
     let ed_sig = [0u8; 64];
     assert_eq!(
@@ -497,16 +503,21 @@ fn registry_rejects_mismatched_signature_type() {
 }
 
 #[test]
-fn registry_rejects_invalid_chain_id() {
+fn registry_rejects_signature_for_other_contract() {
     let key = sk(29);
-    let mut reg = LinkRegistry::new();
-    let mut req = evm_request(&key, "alice.testnet", 1, EXPIRES);
-    req.chain_id = "test net".into();
-    let sig = evm_sign(&key, &req.message());
+    let mut reg = LinkRegistry::new("test");
+    // Signed for another deployment of the contract, submitted to this one.
+    let signed_for = LinkRequest {
+        contract: account("other.testnet"),
+        ..evm_request(&key, "alice.testnet", 1, EXPIRES)
+    };
+    let sig = evm_sign(&key, &signed_for.message());
+    let claimed = evm_request(&key, "alice.testnet", 1, EXPIRES);
     assert_eq!(
-        reg.link(&req, WalletSignature::Evm(&sig), NOW),
-        Err(LinkError::InvalidChainId)
+        reg.link(&claimed, WalletSignature::Evm(&sig), NOW),
+        Err(LinkError::BadSignature)
     );
+    assert!(reg.wallets_of(&account("alice.testnet")).is_empty());
 }
 
 #[test]
@@ -518,12 +529,12 @@ fn registry_ed25519_wallet_links_and_unlinks() {
     let req = LinkRequest {
         wallet: WalletId::Ed25519(pk),
         account: account("alice.testnet"),
-        chain_id: "testnet".into(),
+        contract: account(CONTRACT),
         nonce: 1,
         expires: EXPIRES,
     };
     let sig = key.sign(req.message().as_bytes()).to_bytes();
-    let mut reg = LinkRegistry::new();
+    let mut reg = LinkRegistry::new("test");
     reg.link(&req, WalletSignature::Ed25519(&sig), NOW).unwrap();
     assert_eq!(
         reg.resolve(&WalletId::Ed25519(pk)),
@@ -541,7 +552,7 @@ fn registry_ed25519_wallet_links_and_unlinks() {
 fn registry_unlink_works_and_is_scoped_to_account() {
     let k1 = sk(30);
     let k2 = sk(31);
-    let mut reg = LinkRegistry::new();
+    let mut reg = LinkRegistry::new("test");
 
     for (key, nonce) in [(&k1, 1u64), (&k2, 2u64)] {
         let req = evm_request(key, "alice.testnet", nonce, EXPIRES);

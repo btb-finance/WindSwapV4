@@ -464,18 +464,18 @@ fn withdraw_works_after_token_is_removed() {
     assert_eq!(balance(&c, ALICE, USDC), 0);
 }
 
-// ---- Upgrade from the deployed layout (ContractV1) ----
+// ---- Upgrade from the deployed layout (ContractV3) ----
 
 #[test]
 fn migrate_reads_deployed_state() {
     set_ctx(OWNER, 1_000);
     {
-        // Write the deployed layout, with the same storage prefixes as the testnet contract.
+        // Write the deployed (v3) layout, with the same storage prefixes as the testnet contract.
         let mut balances = LookupMap::new(StorageKey::Balances);
         balances.insert((acct(ALICE), USDC.to_string()), 42u128);
         let mut allowed_tokens = IterableSet::new(StorageKey::AllowedTokens);
         allowed_tokens.insert(acct(USDC));
-        let old = ContractV1 {
+        let old = ContractV3 {
             owner: acct(OWNER),
             fee_config: FeeConfig::default(),
             pools: IterableMap::new(StorageKey::Pools),
@@ -483,6 +483,7 @@ fn migrate_reads_deployed_state() {
             next_pool_id: 3,
             balances,
             allowed_tokens,
+            mpc_contract: acct("mpc.example.testnet"),
         };
         env::state_write(&old);
     }
@@ -490,14 +491,37 @@ fn migrate_reads_deployed_state() {
     let mut c = Contract::migrate();
     assert_eq!(c.owner, acct(OWNER));
     assert_eq!(c.next_pool_id, 3);
-    assert_eq!(balance(&c, ALICE, USDC), 42);
     assert_eq!(c.get_tokens(), vec![acct(USDC)], "whitelist is kept");
-    assert_eq!(c.get_mpc_contract(), acct("v1.signer-prod.testnet"));
+    assert_eq!(
+        c.get_mpc_contract(),
+        acct("mpc.example.testnet"),
+        "mpc contract is kept"
+    );
+
+    // The v3 balance is not visible under the new keys until it is migrated.
+    assert_eq!(balance(&c, ALICE, USDC), 0);
+    assert_eq!(c.get_legacy_balance(acct(ALICE), USDC.into()).0, 42);
+
+    // Owner moves it; a second run is a no-op.
+    set_ctx(OWNER, 1_000);
+    assert_eq!(c.migrate_balances(vec![(acct(ALICE), USDC.into())]), 1);
+    assert_eq!(balance(&c, ALICE, USDC), 42);
+    assert_eq!(c.get_legacy_balance(acct(ALICE), USDC.into()).0, 0);
+    assert_eq!(c.migrate_balances(vec![(acct(ALICE), USDC.into())]), 0);
+    assert_eq!(balance(&c, ALICE, USDC), 42);
 
     // The migrated contract works: a whitelisted deposit is still credited.
     set_ctx(USDC, 1_000);
     let _ = c.ft_on_transfer(acct(ALICE), U128(8), String::new());
     assert_eq!(balance(&c, ALICE, USDC), 50);
+}
+
+#[test]
+#[should_panic(expected = "only owner")]
+fn migrate_balances_is_owner_only() {
+    let mut c = setup();
+    set_ctx(ALICE, 1_000);
+    c.migrate_balances(vec![(acct(ALICE), USDC.into())]);
 }
 
 #[test]
@@ -945,7 +969,7 @@ fn failed_route_leaves_contract_state_unchanged() {
     let result = c.route_exact_input(
         &resolved,
         &mut working,
-        engine_account(&acct(BOB)),
+        owner_of_account(&acct(BOB)),
         AMOUNT_IN,
         quoted + 1,
     );

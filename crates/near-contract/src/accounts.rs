@@ -1,7 +1,15 @@
-//! Wallet linking: one Wind Swap account, reachable from many wallets on many chains.
+//! Wallet linking and signed wallet actions: one Wind Swap account, reachable from many wallets
+//! on many chains.
 //!
-//! This module is pure logic. It has no storage and no public contract methods; the contract
-//! wires [`LinkRegistry`] into its state later.
+//! [`LinkRegistry`] keeps its links in contract storage; the rest is pure logic. The contract
+//! exposes the public methods in `lib.rs`.
+//!
+//! # Owners
+//!
+//! Balances and positions belong to an [`Owner`]: the engine's 32-byte account id.
+//! - A NEAR account `a` owns `sha256(a)` (the same id positions already used).
+//! - A wallet that is not linked to any NEAR account owns `sha256(canonical wallet string)`.
+//! - A linked wallet acts for the owner of the NEAR account it is linked to.
 //!
 //! # Wallet identifiers
 //!
@@ -10,38 +18,42 @@
 //! - `evm:0x<40 lowercase hex>`: a 20-byte EVM address. Parsing accepts any hex case; output is lowercase.
 //! - `ed25519:<base58>`: a 32-byte Ed25519 public key (the NEAR and Solana key format).
 //!
-//! # Link message
+//! # Signed messages
 //!
-//! The user signs this exact UTF-8 text with the wallet (EIP-191 `personal_sign` for EVM,
-//! raw bytes for Ed25519):
+//! Every signed message names the contract account (`env::current_account_id()`), so a signature
+//! made for one deployment cannot be replayed on another. The wallet signs the exact UTF-8 text
+//! (EIP-191 `personal_sign` for EVM, raw bytes for Ed25519).
+//!
+//! Link message (signed once per wallet, see `LinkRegistry::link`):
 //!
 //! ```text
-//! Wind Swap v4: link wallet {wallet} to account {account} on {chain_id} nonce {nonce} expires {expires}
+//! Wind Swap v4: link wallet {wallet} to account {account} on {contract} nonce {nonce} expires {expires}
 //! ```
 //!
-//! - `{wallet}`: the canonical wallet string (see above).
+//! Action message (signed per action, see `execute` in `lib.rs`):
+//!
+//! ```text
+//! Wind Swap v4 action on {contract} by {wallet} nonce {nonce} expires {expires}: {action}
+//! ```
+//!
+//! - `{wallet}`: the canonical wallet string.
 //! - `{account}`: the NEAR account id the wallet is linked to.
-//! - `{chain_id}`: the network the link is registered on, e.g. `testnet` or `mainnet`. The contract
-//!   passes it in from its own network so a signature cannot be replayed on another network.
-//!   It must be non-empty and contain no whitespace.
-//! - `{nonce}`: decimal `u64`, unique per wallet.
-//! - `{expires}`: decimal unix time in seconds. The link is valid while `now <= expires`.
-//!
-//! # Engine ids
-//!
-//! The engine identifies an account by a 32-byte id:
-//! - `Near(a)`: `sha256(a)`, exactly what `engine_account` in `lib.rs` already computes, so
-//!   existing NEAR positions keep working.
-//! - `Evm` / `Ed25519`: `sha256(canonical string)`, used for wallets that are not linked to any
-//!   NEAR account yet.
+//! - `{contract}`: the contract account id, e.g. `windswapv4-btb.testnet`.
+//! - `{nonce}`: decimal `u64`, unique per wallet and per message kind.
+//! - `{expires}`: decimal unix time in seconds. Valid while `now <= expires`.
+//! - `{action}`: `serde_json::to_string` of the action enum (externally tagged, fields in
+//!   declaration order, no whitespace). See `SignedAction` in `lib.rs`.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::str::FromStr;
 
 use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
+use near_sdk::store::{LookupMap, LookupSet};
 use near_sdk::{env, AccountId};
+
+/// The engine id of an account, a wallet, or any other owner of balances and positions.
+pub type Owner = [u8; 32];
 
 /// Prefix of every link message. Also documents the format at a glance.
 pub const LINK_MESSAGE_PREFIX: &str = "Wind Swap v4: link wallet ";
@@ -162,12 +174,26 @@ impl From<WalletId> for String {
 pub fn link_message(
     wallet: &WalletId,
     account: &AccountId,
-    chain_id: &str,
+    contract: &AccountId,
     nonce: u64,
     expires: u64,
 ) -> String {
     format!(
-        "{LINK_MESSAGE_PREFIX}{wallet} to account {account} on {chain_id} nonce {nonce} expires {expires}"
+        "{LINK_MESSAGE_PREFIX}{wallet} to account {account} on {contract} nonce {nonce} expires {expires}"
+    )
+}
+
+/// Builds the exact action message the wallet must sign. `action_json` is the canonical JSON of
+/// the action (`serde_json::to_string` of `SignedAction`). See the module docs for the format.
+pub fn action_message(
+    contract: &AccountId,
+    wallet: &WalletId,
+    nonce: u64,
+    expires: u64,
+    action_json: &str,
+) -> String {
+    format!(
+        "Wind Swap v4 action on {contract} by {wallet} nonce {nonce} expires {expires}: {action_json}"
     )
 }
 
@@ -184,12 +210,37 @@ pub fn verify_ed25519_link(msg: &str, sig: &[u8; 64], pk: &[u8; 32]) -> bool {
     env::ed25519_verify(sig, msg.as_bytes(), pk)
 }
 
-/// Deterministic 32-byte engine id for a wallet. See the module docs.
-pub fn engine_id_for(wallet: &WalletId) -> [u8; 32] {
+/// Verifies a wallet's signature over `msg`. A signature of the wrong type for the wallet fails.
+pub fn verify_wallet_signature(msg: &str, wallet: &WalletId, sig: WalletSignature<'_>) -> bool {
+    match (wallet, sig) {
+        (WalletId::Evm(address), WalletSignature::Evm(s)) => verify_evm_link(msg, s, *address),
+        (WalletId::Ed25519(pk), WalletSignature::Ed25519(s)) => verify_ed25519_link(msg, s, pk),
+        _ => false,
+    }
+}
+
+/// Deterministic engine id for a wallet. See the module docs.
+pub fn engine_id_for(wallet: &WalletId) -> Owner {
     match wallet {
-        WalletId::Near(account) => env::sha256_array(account.as_bytes()),
+        WalletId::Near(account) => owner_of_account(account),
         other => env::sha256_array(other.to_string().as_bytes()),
     }
+}
+
+/// The owner of a NEAR account: `sha256(account id)`, the same value positions always used.
+pub fn owner_of_account(account: &AccountId) -> Owner {
+    env::sha256_array(account.as_bytes())
+}
+
+/// Lower-case hex of an owner id (64 characters, no prefix).
+pub fn owner_hex(owner: &Owner) -> String {
+    hex_lower(owner)
+}
+
+/// Parses an owner id written as 64 hex digits (an optional `0x` prefix is allowed).
+pub fn parse_owner_hex(s: &str) -> Option<Owner> {
+    let bytes = hex_decode(s.strip_prefix("0x").unwrap_or(s))?;
+    bytes.try_into().ok()
 }
 
 /// A request to link `wallet` to `account`. The wallet must sign `message()`.
@@ -197,7 +248,8 @@ pub fn engine_id_for(wallet: &WalletId) -> [u8; 32] {
 pub struct LinkRequest {
     pub wallet: WalletId,
     pub account: AccountId,
-    pub chain_id: String,
+    /// The contract account the wallet signs for. Normally `env::current_account_id()`.
+    pub contract: AccountId,
     pub nonce: u64,
     pub expires: u64,
 }
@@ -208,14 +260,14 @@ impl LinkRequest {
         link_message(
             &self.wallet,
             &self.account,
-            &self.chain_id,
+            &self.contract,
             self.nonce,
             self.expires,
         )
     }
 }
 
-/// A wallet's signature over a link message.
+/// A wallet's signature over a message, borrowed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WalletSignature<'a> {
     /// 65-byte EIP-191 signature `r || s || v`.
@@ -224,13 +276,59 @@ pub enum WalletSignature<'a> {
     Ed25519(&'a [u8; 64]),
 }
 
+/// A decoded wallet signature, owned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignatureBytes {
+    Evm([u8; 65]),
+    Ed25519([u8; 64]),
+}
+
+impl SignatureBytes {
+    pub fn as_wallet_signature(&self) -> WalletSignature<'_> {
+        match self {
+            Self::Evm(s) => WalletSignature::Evm(s),
+            Self::Ed25519(s) => WalletSignature::Ed25519(s),
+        }
+    }
+}
+
+/// Decodes a signature string for `wallet`.
+///
+/// - EVM: 65 bytes as hex, with or without `0x`.
+/// - Ed25519: 64 bytes, as 128 hex digits (with or without `0x`) or as base58.
+pub fn parse_signature(wallet: &WalletId, s: &str) -> Result<SignatureBytes, String> {
+    match wallet {
+        WalletId::Near(_) => Err("NEAR accounts call methods directly and do not sign".into()),
+        WalletId::Evm(_) => {
+            let bytes =
+                hex_decode(s.strip_prefix("0x").unwrap_or(s)).ok_or("EVM signature must be hex")?;
+            let sig: [u8; 65] = bytes
+                .try_into()
+                .map_err(|_| "EVM signature must be 65 bytes".to_string())?;
+            Ok(SignatureBytes::Evm(sig))
+        }
+        WalletId::Ed25519(_) => {
+            let hex_digits = s.strip_prefix("0x").unwrap_or(s);
+            let bytes = if hex_digits.len() == 128 {
+                hex_decode(hex_digits).ok_or("Ed25519 signature must be hex or base58")?
+            } else {
+                bs58::decode(s)
+                    .into_vec()
+                    .map_err(|_| "Ed25519 signature must be hex or base58".to_string())?
+            };
+            let sig: [u8; 64] = bytes
+                .try_into()
+                .map_err(|_| "Ed25519 signature must be 64 bytes".to_string())?;
+            Ok(SignatureBytes::Ed25519(sig))
+        }
+    }
+}
+
 /// Why a link or unlink was rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkError {
     /// NEAR accounts are themselves and cannot be linked.
     NearWalletNotLinkable,
-    /// `chain_id` is empty or contains whitespace.
-    InvalidChainId,
     /// `now` is after the request's `expires`.
     Expired,
     /// This `(wallet, nonce)` was already used.
@@ -249,7 +347,6 @@ impl fmt::Display for LinkError {
             Self::NearWalletNotLinkable => {
                 "NEAR wallets are the account itself and cannot be linked"
             }
-            Self::InvalidChainId => "chain id must be non-empty and contain no whitespace",
             Self::Expired => "link request has expired",
             Self::NonceUsed => "link nonce was already used for this wallet",
             Self::BadSignature => "wallet signature does not verify",
@@ -262,7 +359,7 @@ impl fmt::Display for LinkError {
 
 impl std::error::Error for LinkError {}
 
-/// In-memory wallet-to-account links. Storage is added by the contract later.
+/// Wallet-to-account links, kept in contract storage.
 ///
 /// Rules:
 /// - A wallet belongs to at most one account. Re-linking it to the same account is a no-op.
@@ -271,21 +368,29 @@ impl std::error::Error for LinkError {}
 ///   signed request cannot be replayed.
 /// - Account consent is not checked here. The contract must check that the caller (the NEAR
 ///   predecessor) is `account` before calling [`LinkRegistry::link`] and [`LinkRegistry::unlink`].
-/// - NEAR wallets are never stored. They resolve to `engine_account(account)` directly.
+/// - NEAR wallets are never stored. They resolve to [`owner_of_account`] directly.
 /// - Unlinked wallets resolve to their own [`engine_id_for`] value.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(BorshSerialize, BorshDeserialize)]
+#[borsh(crate = "near_sdk::borsh")]
 pub struct LinkRegistry {
-    /// Linked wallet -> engine id of its account.
-    wallet_to_account: BTreeMap<WalletId, [u8; 32]>,
-    /// Engine id of an account -> its linked wallets.
-    account_to_wallets: BTreeMap<[u8; 32], BTreeSet<WalletId>>,
+    /// Linked wallet -> owner of its account.
+    wallet_to_owner: LookupMap<WalletId, Owner>,
+    /// Owner of an account -> its linked wallets.
+    owner_to_wallets: LookupMap<Owner, Vec<WalletId>>,
     /// Consumed `(wallet, nonce)` pairs. Never pruned.
-    used_nonces: BTreeSet<(WalletId, u64)>,
+    used_nonces: LookupSet<(WalletId, u64)>,
 }
 
 impl LinkRegistry {
-    pub fn new() -> Self {
-        Self::default()
+    /// A registry whose collections use the storage prefixes `{prefix}:wallet`, `{prefix}:owner`
+    /// and `{prefix}:nonce`. `prefix` must be unique in the contract.
+    pub fn new(prefix: &str) -> Self {
+        let key = |suffix: &str| [prefix.as_bytes(), suffix.as_bytes()].concat();
+        Self {
+            wallet_to_owner: LookupMap::new(key(":wallet")),
+            owner_to_wallets: LookupMap::new(key(":owner")),
+            used_nonces: LookupSet::new(key(":nonce")),
+        }
     }
 
     /// Links the request's wallet to its account after checking the wallet's signature.
@@ -300,9 +405,6 @@ impl LinkRegistry {
         if matches!(req.wallet, WalletId::Near(_)) {
             return Err(LinkError::NearWalletNotLinkable);
         }
-        if !valid_chain_id(&req.chain_id) {
-            return Err(LinkError::InvalidChainId);
-        }
         if now > req.expires {
             return Err(LinkError::Expired);
         }
@@ -310,54 +412,53 @@ impl LinkRegistry {
         if self.used_nonces.contains(&nonce_key) {
             return Err(LinkError::NonceUsed);
         }
-
-        let msg = req.message();
-        let signed = match (&req.wallet, sig) {
-            (WalletId::Evm(address), WalletSignature::Evm(s)) => verify_evm_link(&msg, s, *address),
-            (WalletId::Ed25519(pk), WalletSignature::Ed25519(s)) => {
-                verify_ed25519_link(&msg, s, pk)
-            }
-            _ => false,
-        };
-        if !signed {
+        if !verify_wallet_signature(&req.message(), &req.wallet, sig) {
             return Err(LinkError::BadSignature);
         }
 
-        let account = engine_account_of(&req.account);
-        match self.wallet_to_account.get(&req.wallet) {
-            Some(existing) if *existing == account => return Ok(()),
+        let owner = owner_of_account(&req.account);
+        match self.wallet_to_owner.get(&req.wallet) {
+            Some(existing) if *existing == owner => return Ok(()),
             Some(_) => return Err(LinkError::AlreadyLinked),
             None => {}
         }
 
-        self.wallet_to_account.insert(req.wallet.clone(), account);
-        self.account_to_wallets
-            .entry(account)
-            .or_default()
-            .insert(req.wallet.clone());
+        self.wallet_to_owner.insert(req.wallet.clone(), owner);
+        let mut wallets = self
+            .owner_to_wallets
+            .get(&owner)
+            .cloned()
+            .unwrap_or_default();
+        wallets.push(req.wallet.clone());
+        self.owner_to_wallets.insert(owner, wallets);
         self.used_nonces.insert(nonce_key);
         Ok(())
     }
 
     /// Unlinks `wallet` from `account`. The nonce stays consumed.
     pub fn unlink(&mut self, account: &AccountId, wallet: &WalletId) -> Result<(), LinkError> {
-        let account = engine_account_of(account);
-        if self.wallet_to_account.get(wallet) != Some(&account) {
+        let owner = owner_of_account(account);
+        if self.wallet_to_owner.get(wallet) != Some(&owner) {
             return Err(LinkError::NotLinked);
         }
-        self.wallet_to_account.remove(wallet);
-        if let Some(wallets) = self.account_to_wallets.get_mut(&account) {
-            wallets.remove(wallet);
-            if wallets.is_empty() {
-                self.account_to_wallets.remove(&account);
-            }
+        self.wallet_to_owner.remove(wallet);
+        let mut wallets = self
+            .owner_to_wallets
+            .get(&owner)
+            .cloned()
+            .unwrap_or_default();
+        wallets.retain(|w| w != wallet);
+        if wallets.is_empty() {
+            self.owner_to_wallets.remove(&owner);
+        } else {
+            self.owner_to_wallets.insert(owner, wallets);
         }
         Ok(())
     }
 
-    /// Engine id of the account that `wallet` acts for.
-    pub fn resolve(&self, wallet: &WalletId) -> [u8; 32] {
-        self.wallet_to_account
+    /// Owner that `wallet` acts for.
+    pub fn resolve(&self, wallet: &WalletId) -> Owner {
+        self.wallet_to_owner
             .get(wallet)
             .copied()
             .unwrap_or_else(|| engine_id_for(wallet))
@@ -365,20 +466,14 @@ impl LinkRegistry {
 
     /// Wallets linked to `account`, in canonical order.
     pub fn wallets_of(&self, account: &AccountId) -> Vec<WalletId> {
-        self.account_to_wallets
-            .get(&engine_account_of(account))
-            .map(|wallets| wallets.iter().cloned().collect())
-            .unwrap_or_default()
+        let mut wallets = self
+            .owner_to_wallets
+            .get(&owner_of_account(account))
+            .cloned()
+            .unwrap_or_default();
+        wallets.sort();
+        wallets
     }
-}
-
-/// Same value as `engine_account` in `lib.rs`: `sha256(account_id bytes)`.
-fn engine_account_of(account: &AccountId) -> [u8; 32] {
-    env::sha256_array(account.as_bytes())
-}
-
-fn valid_chain_id(chain_id: &str) -> bool {
-    !chain_id.is_empty() && !chain_id.chars().any(char::is_whitespace)
 }
 
 /// EIP-191 `personal_sign` digest: `keccak256("\x19Ethereum Signed Message:\n" + len + msg)`.
@@ -408,8 +503,9 @@ fn hex_lower(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Strict hex decoding: even length, ASCII hex digits only.
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if !s.is_ascii() || s.len() % 2 != 0 {
+    if !s.is_ascii() || s.len() % 2 != 0 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     (0..s.len())
