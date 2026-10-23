@@ -1,29 +1,38 @@
-//! Port of the core lock logic of windv2 `VotingEscrow.sol` (veNFT escrow) and of
-//! `BalanceLogicLibrary.sol`.
+//! Port of windv2 `VotingEscrow.sol` (veNFT escrow) and of `BalanceLogicLibrary.sol` and
+//! `DelegationLogicLibrary.sol`.
 //!
-//! Ported: `LockedBalance`, `UserPoint`, `GlobalPoint`, `_checkpoint` (slope and bias, scheduled
-//! slope changes, the weekly global point loop), `createLock` / `createLockFor`, `depositFor`,
+//! Ported in this module: `LockedBalance`, `UserPoint`, `GlobalPoint`, `_checkpoint` (slope and bias,
+//! scheduled slope changes, the weekly global point loop), `createLock` / `createLockFor`, `depositFor`,
 //! `increaseAmount`, `increaseUnlockTime`, `withdraw`, `merge`, `split` (with `toggleSplit`),
 //! `lockPermanent`, `unlockPermanent`, `balanceOfNFT(At)`, `totalSupply(At)`, `checkpoint()`, the point
-//! getters, `permanentLockBalance` and `supply`, plus `voting` (sets `voted`).
+//! getters, `permanentLockBalance` and `supply`, `voting`, and `setVoterAndDistributor`.
+//!
+//! Also ported, in submodules:
+//! - `ve/delegation.rs`: the voting checkpoints (`checkpointDelegator`, `checkpointDelegatee`), `_delegate`,
+//!   `delegate`, `delegateBySig` (the recovered signer is an input), `getPastVotes`, and the `delegates`,
+//!   `numCheckpoints`, `checkpoints` and `nonces` reads. Mint, burn, transfer, merge, split, increase and
+//!   `unlockPermanent` update the checkpoints as in Solidity.
+//! - `ve/managed.rs`: `createManagedLockFor`, `depositManaged`, `withdrawManaged`, `setManagedState`,
+//!   `setAllowedManager`, and the free reward claim and notify that `FreeManagedReward` exposes on the
+//!   escrow's behalf. The `EscrowType` checks (`NotNormalNFT`, `NotManagedOrNormalNFT`, `NotDistributor`)
+//!   apply on every path. The reward contracts are in `rewards_managed.rs` and `rewards.rs`.
 //!
 //! Not ported (out of scope for this module):
-//! - Managed veNFTs (`createManagedLockFor`, `depositManaged`, `withdrawManaged`, `setManagedState`) and
-//!   the `EscrowType` checks. Every token here is `NORMAL`, so `NotNormalNFT` and `NotManagedOrNormalNFT`
-//!   cannot fire.
-//! - Delegation and voting checkpoints (`DelegationLogicLibrary`). `_checkpointDelegator` (mint, transfer,
-//!   burn) and `_checkpointDelegatee` (merge, split, increase) are skipped. `_delegate`, called by
-//!   `unlockPermanent`, is reduced to its one core-visible effect, the `OwnershipChange` revert. With no
-//!   delegations, `_delegates` is always zero, so the skipped calls never touch the core state. The
-//!   differential generator never calls `delegate` / `delegateBySig`, which is what keeps the vectors
-//!   matching. Delegation checkpoints, `numCheckpoints`, `nonces` and `getPastVotes` are not modelled.
-//! - ERC-721 approvals, operators, `safeTransferFrom` (and its receiver check), metadata, art proxy,
-//!   `team` / `allowedManager` administration beyond `toggleSplit`. Ownership is a plain `owner_of` map,
-//!   and the caller must be the owner, which is `_isApprovedOrOwner` with no approvals.
+//! - ERC-721 approvals and operators (`approve`, `setApprovalForAll`, `getApproved`), `safeTransferFrom`
+//!   and its receiver check, metadata, `tokenURI`, art proxy, `setTeam`, `setArtProxy`, `supportsInterface`
+//!   and `clock`. Ownership is a plain `owner_of` map. The owner check is `_isApprovedOrOwner` with no
+//!   approvals, which keeps the Solidity's zero-spender quirk (see `is_approved_or_owner`).
+//! - The EIP-712 digest and `ecrecover` behind `delegateBySig`. The NEAR layer computes the signer and the
+//!   `s`-range result, and passes them in. `delegate_by_sig` applies the rest of the Solidity in order.
 //! - Token balances and events. Each function that pulls or pays WIND returns the amount instead, and the
-//!   caller moves the balances. Solidity pulls WIND in `_depositFor` and pays it out in `withdraw`.
-//! - The `voter` / `distributor` wiring is limited to the `voter` check in `voting`. `voter` starts as
-//!   `team`, as in the constructor.
+//!   caller moves the balances. A managed `increaseAmount` / `depositFor` moves the same amount on from the
+//!   escrow to its `LockedManagedReward`. A `withdrawManaged` moves the reward from that contract to the
+//!   escrow. The escrow's `supply` tracks the sum of these balances (the differential test checks this).
+//! - Reward contract token transfers (see `rewards_managed.rs`).
+//! - The Voter is a set of inputs: `voter` is stored, while `governor` and `emergencyCouncil` are passed
+//!   to the functions that check them. `distributor` is stored and used by `depositFor`.
+//! - `nonReentrant` and the ERC-2771 forwarder.
+//! - A zero `to` in `_mint` is reported as `InvalidInput` (Solidity `assert` gives `Panic(1)`).
 //!
 //! Atomicity: as with ClPool, an `Err` means the call must be discarded. The Solidity call reverts and
 //! the state is unchanged, and a caller that needs rollback clones the struct before the call. The
@@ -35,7 +44,12 @@
 use std::collections::BTreeMap;
 
 use crate::error::{MathError, Result};
+mod delegation;
+mod managed;
+
 use crate::fees::AccountId;
+use crate::rewards::RewardToken;
+use crate::rewards_managed::ManagedRewards;
 use crate::U256;
 
 /// `VotingEscrow.WEEK` (`1 weeks`).
@@ -90,6 +104,32 @@ pub struct GlobalPoint {
     pub permanent_lock_balance: U256,
 }
 
+/// `IVotingEscrow.EscrowType`. `Normal` is the default for every token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EscrowType {
+    /// A typical veNFT.
+    #[default]
+    Normal,
+    /// A veNFT deposited into a managed veNFT (`depositManaged`).
+    Locked,
+    /// A managed veNFT that accepts normal veNFTs.
+    Managed,
+}
+
+/// `IVotingEscrow.Checkpoint`: a voting checkpoint of one token. `owner` is the zero account for a burnt
+/// token. `delegatee` is zero when the token is not delegating.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct VoteCheckpoint {
+    /// `fromTimestamp`.
+    pub from_timestamp: u64,
+    /// `owner`.
+    pub owner: AccountId,
+    /// `delegatedBalance`: votes received by delegation.
+    pub delegated_balance: U256,
+    /// `delegatee`: the token this one delegates to, or zero.
+    pub delegatee: u64,
+}
+
 /// State of the core `VotingEscrow`. Field names mirror the Solidity state variables.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VotingEscrow {
@@ -123,15 +163,39 @@ pub struct VotingEscrow {
     pub user_point_history: BTreeMap<(u64, u64), UserPoint>,
     /// `slopeChanges`: scheduled slope change at each lock end.
     pub slope_changes: BTreeMap<u64, i128>,
+    /// `token`: the escrowed WIND address, as a reward token string (`RewardToken`). The managed reward
+    /// contracts check their token against it. Empty until set by the deployment.
+    pub token: RewardToken,
+    /// `distributor`: the only caller allowed to `depositFor` a managed veNFT.
+    pub distributor: AccountId,
+    /// `allowedManager`: may call `createManagedLockFor` together with the governor.
+    pub allowed_manager: AccountId,
+    /// `escrowType`. A missing entry is `Normal`.
+    pub escrow_type: BTreeMap<u64, EscrowType>,
+    /// `idToManaged`: the managed veNFT a locked token is in. Zero when none.
+    pub id_to_managed: BTreeMap<u64, u64>,
+    /// `weights[tokenId][managedTokenId]`.
+    pub weights: BTreeMap<(u64, u64), U256>,
+    /// `deactivated`: set by `setManagedState`.
+    pub deactivated: BTreeMap<u64, bool>,
+    /// `managedToLocked` / `managedToFree`, keyed by managed token id. The two reward contracts created
+    /// by `createManagedLockFor`.
+    pub managed_rewards: BTreeMap<u64, ManagedRewards>,
+    /// `_delegates`: the delegatee of each token, zero when none.
+    pub delegates: BTreeMap<u64, u64>,
+    /// `_checkpoints[tokenId]`. `numCheckpoints[tokenId]` is the length of the vector.
+    pub checkpoints: BTreeMap<u64, Vec<VoteCheckpoint>>,
+    /// `nonces[account]` for `delegateBySig`.
+    pub nonces: BTreeMap<AccountId, U256>,
 }
 
 /// `int128` checked add (Solidity panics with `0x11`).
-fn add_i(a: i128, b: i128) -> Result<i128> {
+pub(crate) fn add_i(a: i128, b: i128) -> Result<i128> {
     a.checked_add(b).ok_or(MathError::Overflow)
 }
 
 /// `int128` checked sub (Solidity panics with `0x11`).
-fn sub_i(a: i128, b: i128) -> Result<i128> {
+pub(crate) fn sub_i(a: i128, b: i128) -> Result<i128> {
     a.checked_sub(b).ok_or(MathError::Overflow)
 }
 
@@ -141,17 +205,17 @@ fn mul_i(a: i128, b: i128) -> Result<i128> {
 }
 
 /// `uint256` checked add (Solidity panics with `0x11`).
-fn add_u(a: U256, b: U256) -> Result<U256> {
+pub(crate) fn add_u(a: U256, b: U256) -> Result<U256> {
     a.checked_add(b).ok_or(MathError::Overflow)
 }
 
 /// `uint256` checked sub (Solidity panics with `0x11`).
-fn sub_u(a: U256, b: U256) -> Result<U256> {
+pub(crate) fn sub_u(a: U256, b: U256) -> Result<U256> {
     a.checked_sub(b).ok_or(MathError::Underflow)
 }
 
 /// `SafeCastLibrary.toInt128(uint256)`: reverts `SafeCastOverflow` above `type(int128).max`.
-fn to_int128(value: U256) -> Result<i128> {
+pub(crate) fn to_int128(value: U256) -> Result<i128> {
     if value > U256::from(i128::MAX as u128) {
         return Err(MathError::SafeCastOverflow);
     }
@@ -159,7 +223,7 @@ fn to_int128(value: U256) -> Result<i128> {
 }
 
 /// `SafeCastLibrary.toUint256(int128)`: reverts `SafeCastUnderflow` for a negative value.
-fn to_uint256(value: i128) -> Result<U256> {
+pub(crate) fn to_uint256(value: i128) -> Result<U256> {
     if value < 0 {
         return Err(MathError::SafeCastUnderflow);
     }
@@ -168,12 +232,12 @@ fn to_uint256(value: i128) -> Result<U256> {
 
 /// `((now + duration) / WEEK) * WEEK`, computed in `u128` so it cannot overflow for `u64` inputs.
 /// Used for `createLock` (`_createLock`), `increaseUnlockTime` and `unlockPermanent`.
-fn round_to_week(now: u64, duration: u64) -> u128 {
+pub(crate) fn round_to_week(now: u64, duration: u64) -> u128 {
     let week = WEEK as u128;
     ((now as u128 + duration as u128) / week) * week
 }
 
-fn to_u64(value: u128) -> Result<u64> {
+pub(crate) fn to_u64(value: u128) -> Result<u64> {
     u64::try_from(value).map_err(|_| MathError::Overflow)
 }
 
@@ -245,6 +309,17 @@ impl VotingEscrow {
             user_point_epoch: BTreeMap::new(),
             user_point_history: BTreeMap::new(),
             slope_changes: BTreeMap::new(),
+            token: RewardToken::new(),
+            distributor: ZERO_ACCOUNT,
+            allowed_manager: ZERO_ACCOUNT,
+            escrow_type: BTreeMap::new(),
+            id_to_managed: BTreeMap::new(),
+            weights: BTreeMap::new(),
+            deactivated: BTreeMap::new(),
+            managed_rewards: BTreeMap::new(),
+            delegates: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            nonces: BTreeMap::new(),
         }
     }
 
@@ -275,30 +350,48 @@ impl VotingEscrow {
         self.slope_changes.get(&t).copied().unwrap_or(0)
     }
 
+    /// `escrowType[token]`.
+    pub fn escrow_type_of(&self, token: u64) -> EscrowType {
+        self.escrow_type.get(&token).copied().unwrap_or_default()
+    }
+
     /// `ownershipChange[token]`.
     pub fn ownership_change_of(&self, token: u64) -> u64 {
         self.ownership_change.get(&token).copied().unwrap_or(0)
     }
 
-    /// The owner check that `_isApprovedOrOwner` performs. The caller must own the token, as there are
-    /// no approvals.
+    /// `_isApprovedOrOwner(spender, token)`. No approvals are modelled, so `idToApprovals[token]` is always
+    /// zero. The Solidity compares `_spender == idToApprovals[_tokenId]`, so the zero spender passes too.
+    /// That is why `delegateBySig` with a zero signer reaches `InvalidSignature` rather than
+    /// `NotApprovedOrOwner`. Reads no time.
+    pub fn is_approved_or_owner(&self, spender: AccountId, token: u64) -> bool {
+        self.owner(token) == spender || spender == ZERO_ACCOUNT
+    }
+
+    /// The owner check that `_isApprovedOrOwner` performs (`NotApprovedOrOwner`).
     fn require_owner(&self, caller: AccountId, token: u64) -> Result<()> {
-        if self.owner(token) == caller {
+        if self.is_approved_or_owner(caller, token) {
             Ok(())
         } else {
             Err(MathError::NotApprovedOrOwner)
         }
     }
 
-    /// `_mint` (`_addTokenTo`). Ownership only, delegation checkpoints are skipped.
-    fn mint(&mut self, to: AccountId, token: u64) {
+    /// `_mint`: `_addTokenTo`, then `_checkpointDelegator(token, 0, to)`. `assert(_to != 0)` is reported
+    /// as `InvalidInput`. Reads `now`.
+    fn mint(&mut self, now: u64, to: AccountId, token: u64) -> Result<()> {
+        if to == ZERO_ACCOUNT {
+            return Err(MathError::InvalidInput);
+        }
         self.owner_of.insert(token, to);
+        self.checkpoint_delegator(now, token, 0, to)
     }
 
-    /// `_burn` (`_removeTokenFrom`). Checks the caller is the owner, as `_burn` does. Delegation
-    /// checkpoints are skipped.
-    fn burn(&mut self, caller: AccountId, token: u64) -> Result<()> {
+    /// `_burn`: checks the caller is the owner, then `_checkpointDelegator(token, 0, 0)` (dedelegates),
+    /// then removes the owner. Reads `now`.
+    fn burn(&mut self, now: u64, caller: AccountId, token: u64) -> Result<()> {
         self.require_owner(caller, token)?;
+        self.checkpoint_delegator(now, token, 0, ZERO_ACCOUNT)?;
         self.owner_of.remove(&token);
         Ok(())
     }
@@ -328,7 +421,7 @@ impl VotingEscrow {
     ///
     /// Any arithmetic overflow returns `Err` (`Overflow` / `Underflow`). `int128` casts return
     /// `SafeCastOverflow` / `SafeCastUnderflow`.
-    fn checkpoint_inner(
+    pub(crate) fn checkpoint_inner(
         &mut self,
         now: u64,
         block: u64,
@@ -505,7 +598,7 @@ impl VotingEscrow {
     /// `unlock != 0`, stores the new lock, and runs `_checkpoint(token, old, new)`. Returns `value`, the
     /// WIND the caller pays into the escrow. The Solidity order is preserved. The `safeTransferFrom` only
     /// happens when `value != 0` and is represented by the return value.
-    fn deposit_for_inner(
+    pub(crate) fn deposit_for_inner(
         &mut self,
         now: u64,
         block: u64,
@@ -538,7 +631,7 @@ impl VotingEscrow {
         let id = self.token_id;
         self.locked.insert(id, new_locked);
         self.checkpoint_inner(now, block, id, LockedBalance::default(), new_locked)?;
-        self.mint(owner, id);
+        self.mint(now, owner, id)?;
         Ok(id)
     }
 
@@ -569,7 +662,7 @@ impl VotingEscrow {
         }
         self.token_id = self.token_id.checked_add(1).ok_or(MathError::Overflow)?;
         let id = self.token_id;
-        self.mint(to, id);
+        self.mint(now, to, id)?;
         let pulled = self.deposit_for_inner(
             now,
             block,
@@ -621,6 +714,10 @@ impl VotingEscrow {
         token: u64,
         value: U256,
     ) -> Result<U256> {
+        let escrow = self.escrow_type_of(token);
+        if escrow == EscrowType::Locked {
+            return Err(MathError::NotManagedOrNormalNft);
+        }
         let old = self.locked_of(token);
         if value.is_zero() {
             return Err(MathError::ZeroAmount);
@@ -634,13 +731,34 @@ impl VotingEscrow {
         if old.is_permanent {
             self.permanent_lock_balance = add_u(self.permanent_lock_balance, value)?;
         }
-        self.deposit_for_inner(now, block, token, value, 0, old)
+        self.checkpoint_delegatee(now, self.delegate_of(token), value, true)?;
+        let pulled = self.deposit_for_inner(now, block, token, value, 0, old)?;
+        if escrow == EscrowType::Managed {
+            // `increaseAmount` on a managed veNFT is a locked reward: the same amount moves from the escrow
+            // to its `LockedManagedReward`. The escrow's net WIND balance does not change.
+            let rewards = self.managed_rewards_mut(token)?;
+            let escrow_token = rewards.locked.token.clone();
+            rewards
+                .locked
+                .notify_reward_amount(true, &escrow_token, value, now)?;
+        }
+        Ok(pulled)
     }
 
-    /// Port of `VotingEscrow.depositFor(_tokenId, _value)`. Anyone can deposit into any lock (the
-    /// managed-token restriction does not apply). The payer is the caller, and the WIND pulled is
-    /// returned. Reads `now` and `block`.
-    pub fn deposit_for(&mut self, now: u64, block: u64, token: u64, value: U256) -> Result<U256> {
+    /// Port of `VotingEscrow.depositFor(_tokenId, _value)`. A managed veNFT only accepts deposits from the
+    /// `distributor` (`NotDistributor`). The payer is the caller, and the WIND pulled is returned. Reads
+    /// `now` and `block`.
+    pub fn deposit_for(
+        &mut self,
+        caller: AccountId,
+        now: u64,
+        block: u64,
+        token: u64,
+        value: U256,
+    ) -> Result<U256> {
+        if self.escrow_type_of(token) == EscrowType::Managed && caller != self.distributor {
+            return Err(MathError::NotDistributor);
+        }
         self.increase_amount_for(now, block, token, value)
     }
 
@@ -671,6 +789,9 @@ impl VotingEscrow {
         lock_duration: u64,
     ) -> Result<()> {
         self.require_owner(caller, token)?;
+        if self.escrow_type_of(token) != EscrowType::Normal {
+            return Err(MathError::NotNormalNft);
+        }
         let old = self.locked_of(token);
         if old.is_permanent {
             return Err(MathError::PermanentLock);
@@ -711,6 +832,9 @@ impl VotingEscrow {
         if self.is_voted(token) {
             return Err(MathError::AlreadyVoted);
         }
+        if self.escrow_type_of(token) != EscrowType::Normal {
+            return Err(MathError::NotNormalNft);
+        }
         let old = self.locked_of(token);
         if old.is_permanent {
             return Err(MathError::PermanentLock);
@@ -719,7 +843,7 @@ impl VotingEscrow {
             return Err(MathError::LockNotExpired);
         }
         let value = to_uint256(old.amount)?;
-        self.burn(caller, token)?;
+        self.burn(now, caller, token)?;
         self.locked.insert(token, LockedBalance::default());
         self.supply = sub_u(self.supply, value)?;
         self.checkpoint_inner(now, block, token, old, LockedBalance::default())?;
@@ -744,6 +868,11 @@ impl VotingEscrow {
         if self.is_voted(from) {
             return Err(MathError::AlreadyVoted);
         }
+        if self.escrow_type_of(from) != EscrowType::Normal
+            || self.escrow_type_of(to) != EscrowType::Normal
+        {
+            return Err(MathError::NotNormalNft);
+        }
         if from == to {
             return Err(MathError::SameNft);
         }
@@ -763,7 +892,7 @@ impl VotingEscrow {
             old_to.end
         };
 
-        self.burn(caller, from)?;
+        self.burn(now, caller, from)?;
         self.locked.insert(from, LockedBalance::default());
         self.checkpoint_inner(now, block, from, old_from, LockedBalance::default())?;
 
@@ -778,6 +907,12 @@ impl VotingEscrow {
         } else {
             new_to.end = end;
         }
+        self.checkpoint_delegatee(
+            now,
+            self.delegate_of(to),
+            to_uint256(old_from.amount)?,
+            true,
+        )?;
         self.checkpoint_inner(now, block, to, old_to, new_to)?;
         self.locked.insert(to, new_to);
         Ok(())
@@ -807,6 +942,9 @@ impl VotingEscrow {
         if !self.can_split_of(&owner) && !self.can_split_of(&ZERO_ACCOUNT) {
             return Err(MathError::SplitNotAllowed);
         }
+        if self.escrow_type_of(from) != EscrowType::Normal {
+            return Err(MathError::NotNormalNft);
+        }
         if self.is_voted(from) {
             return Err(MathError::AlreadyVoted);
         }
@@ -823,7 +961,7 @@ impl VotingEscrow {
             return Err(MathError::AmountTooBig);
         }
 
-        self.burn(caller, from)?;
+        self.burn(now, caller, from)?;
         self.locked.insert(from, LockedBalance::default());
         self.checkpoint_inner(now, block, from, old, LockedBalance::default())?;
 
@@ -864,6 +1002,9 @@ impl VotingEscrow {
         token: u64,
     ) -> Result<()> {
         self.require_owner(caller, token)?;
+        if self.escrow_type_of(token) != EscrowType::Normal {
+            return Err(MathError::NotNormalNft);
+        }
         let old = self.locked_of(token);
         if old.is_permanent {
             return Err(MathError::PermanentLock);
@@ -901,6 +1042,9 @@ impl VotingEscrow {
         token: u64,
     ) -> Result<()> {
         self.require_owner(caller, token)?;
+        if self.escrow_type_of(token) != EscrowType::Normal {
+            return Err(MathError::NotNormalNft);
+        }
         if self.is_voted(token) {
             return Err(MathError::AlreadyVoted);
         }
@@ -915,9 +1059,7 @@ impl VotingEscrow {
             end: to_u64(round_to_week(now, MAXTIME))?,
             is_permanent: false,
         };
-        if self.ownership_change_of(token) == block {
-            return Err(MathError::OwnershipChange);
-        }
+        self.delegate_inner(now, block, token, 0)?;
         self.checkpoint_inner(now, block, token, old, new)?;
         self.locked.insert(token, new);
         Ok(())
@@ -932,15 +1074,20 @@ impl VotingEscrow {
     pub fn transfer_from(
         &mut self,
         caller: AccountId,
+        now: u64,
         block: u64,
         from: AccountId,
         to: AccountId,
         token: u64,
     ) -> Result<()> {
+        if self.escrow_type_of(token) == EscrowType::Locked {
+            return Err(MathError::NotManagedOrNormalNft);
+        }
         self.require_owner(caller, token)?;
         if self.owner(token) != from {
             return Err(MathError::NotOwner);
         }
+        self.checkpoint_delegator(now, token, 0, to)?;
         self.owner_of.insert(token, to);
         self.ownership_change.insert(token, block);
         Ok(())

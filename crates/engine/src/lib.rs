@@ -15,6 +15,7 @@ pub mod minter;
 pub mod pool;
 pub mod rebase;
 pub mod rewards;
+pub mod rewards_managed;
 pub mod router;
 pub mod ve;
 pub mod voter;
