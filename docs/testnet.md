@@ -94,3 +94,19 @@ Flow tested as `windswapv4-user.testnet` on pool 1 (tUSDC/tWETH, tick spacing 3,
 
 Note: the DEX account must be registered with each token contract (storage) before withdrawals;
 the test-token faucet `mint` registers accounts automatically.
+
+## v2: multi-hop routing, quotes, fee admin (2026-10-23)
+
+Redeployed without migration (state layout unchanged). Wasm SHA-256
+`da58fc1e9c9ce6075cf51df44c9bdd29a438058205cea96829c0087de8e0edfd` (448.6 KB).
+
+| Step | Result |
+|---|---|
+| user balances after upgrade | unchanged (80.6125 tUSDC) |
+| `create_pool` 2: tUSDC/tWETH, tick spacing 5 | pool id 2 |
+| `get_fee` pool 1 / pool 2 | 300 (0.03%) / 2600 (0.26%) |
+| `quote_exact_input` 1 tUSDC via pool 1 → pool 2 | 0.974290305953384360 tUSDC |
+| `swap_exact_input` same route | 0.974290305953384360 tUSDC (identical to quote) |
+| same swap with `min_amount_out` = 2 | panics `TooLittleReceived`, rolled back |
+
+Path format: `[{"pool_id":1,"token_in":"windswapv4-tusdc.testnet"},{"pool_id":2,"token_in":"windswapv4-tweth.testnet"}]`.
