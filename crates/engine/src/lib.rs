@@ -11,6 +11,7 @@ pub mod error;
 pub mod fees;
 pub mod math;
 pub mod pool;
+pub mod router;
 
 pub use alloy_primitives::{I256, U256};
 pub use error::MathError;

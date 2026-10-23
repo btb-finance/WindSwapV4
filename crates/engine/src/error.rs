@@ -45,6 +45,10 @@ pub enum MathError {
     TickNotInitialized,
     /// `CLPool.setGaugeAndPositionManager`: gauge already set.
     GaugeAlreadySet,
+    /// `SwapRouter`: exact-input route delivered less than `amountOutMinimum` (`"Too little received"`).
+    TooLittleReceived,
+    /// `SwapRouter`: exact-output route needed more than `amountInMaximum` (`"Too much requested"`).
+    TooMuchRequested,
 }
 
 impl fmt::Display for MathError {
