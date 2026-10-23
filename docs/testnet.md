@@ -349,3 +349,20 @@ Unbacked credit can be swapped out of any pool that holds that token and a real 
 exists for it. Permissionless pool creation makes that easy. Before enabling this on a network that
 holds value, decide on a guard. Options: pools only for verified tokens, `register_token` tokens
 not poolable until the owner verifies them, or a relayer-side check that is stronger than the log.
+
+## v9 deployed: permissionless pools + `get_pools` (2026-10-23)
+
+Upgraded with `migrate` (v8 → v9). Wasm 1.50 MB, SHA-256 `f2b246764e5286152690fc2643bdf5352733328042f617d2d0e1d2b784170379`.
+
+| Check | Result |
+|---|---|
+| `get_pools(0, 100)` via FastNEAR RPC | **all 5 pools in one call**, 2,086-byte response, ~0.5 s (reads saved summaries, not full pools) |
+| owner `set_default_caps` (1,000 tokens per deposit / per day for auto-registered ERC-20s) | ok |
+| **non-owner** `windswapv4-user.testnet` `create_pool` tUSDC/tWETH spacing 1 with 0.1 NEAR | pool **5** created |
+| same pair + spacing again (token order swapped) | rejected: `pool 5 already exists for this pair and tick spacing` |
+| non-owner without the deposit | rejected: storage deposit required |
+| `get_pool_id(tWETH, tUSDC, 1)` | 5 |
+
+Trust note: unverified tokens (auto-registered ERC-20s, `register_token` NEP-141s) can be minted at will by their issuer,
+exactly like scam tokens on Uniswap — they cannot touch other tokens (ids are address-based), but LPs in a pool paired
+with an unverified token can lose the real side. The frontend must default to verified tokens and warn on unverified ones.
