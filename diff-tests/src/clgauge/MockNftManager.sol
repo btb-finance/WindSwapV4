@@ -3,6 +3,8 @@ pragma solidity =0.7.6;
 pragma abicoder v2;
 
 import {INonfungiblePositionManager} from "contracts/periphery/interfaces/INonfungiblePositionManager.sol";
+import {FullMath} from "contracts/core/libraries/FullMath.sol";
+import {FixedPoint128} from "contracts/core/libraries/FixedPoint128.sol";
 
 interface IMockPoolNft {
     function gauge() external view returns (address);
@@ -20,6 +22,10 @@ interface IMockPoolNft {
         uint128 amount1Requested,
         address owner
     ) external returns (uint128, uint128);
+    function positions(bytes32 key)
+        external
+        view
+        returns (uint128 liquidity, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128, uint128, uint128);
 }
 
 interface IMockMintable {
@@ -32,12 +38,12 @@ interface IMockMintable {
 ///  - `ownerOf` reverts for unknown ids, `positions` reverts for unknown ids (as the real one does);
 ///  - `safeTransferFrom` requires the caller to be the owner or approved for all by the owner.
 ///    It does not call `onERC721Received` (the gauge's receiver is a no-op).
-///  - `collect` requires the caller to be owner or approved (the real manager does the same). It mirrors
-///    `NonfungiblePositionManager.collect`: when the position has liquidity it calls `burn(0)` so the pool
-///    syncs the owed amounts, on the gauge's pool position if the gauge holds the NFT and on its own
-///    otherwise, then pays out the requested owed amounts from that same pool position. The real
-///    manager pays per-NFT `tokensOwed` (fee-growth snapshots); this stand-in pays the pool position's
-///    owed amounts directly. Only the payout amounts differ; the gauge logic does not read them.
+/// The position accounting is the real manager's, per NFT: `mintPosition` snapshots the pool
+/// position's fee growth, and `collect` and `decreaseLiquidity` follow `NonfungiblePositionManager.sol`
+/// (the `isStaked` branches, `tokensOwed`, the `burn(0)` poke). The differences are only in the
+/// entry points: `mintPosition` replaces `mint` (no ETH, no deadline, no pool creation), there are no
+/// `amountMin` checks, and the 3-argument `burn`/`collect` are called with the owner argument (the
+/// same pool position as `msg.sender`).
 /// `WETH9()` returns zero: the gauge only records it.
 contract MockNftManager {
     struct Position {
@@ -47,6 +53,10 @@ contract MockNftManager {
         int24 tickLower;
         int24 tickUpper;
         uint128 liquidity;
+        uint256 feeGrowthInside0LastX128;
+        uint256 feeGrowthInside1LastX128;
+        uint128 tokensOwed0;
+        uint128 tokensOwed1;
     }
 
     IMockPoolNft public pool;
@@ -107,7 +117,20 @@ contract MockNftManager {
     {
         require(_owners[tokenId] != address(0), "Invalid token ID");
         Position storage p = _positions[tokenId];
-        return (0, address(0), p.token0, p.token1, p.tickSpacing, p.tickLower, p.tickUpper, p.liquidity, 0, 0, 0, 0);
+        return (
+            0,
+            address(0),
+            p.token0,
+            p.token1,
+            p.tickSpacing,
+            p.tickLower,
+            p.tickUpper,
+            p.liquidity,
+            p.feeGrowthInside0LastX128,
+            p.feeGrowthInside1LastX128,
+            p.tokensOwed0,
+            p.tokensOwed1
+        );
     }
 
     function setApprovalForAll(address operator, bool approved) external {
@@ -119,15 +142,29 @@ contract MockNftManager {
         return owner == spender || isApprovedForAll[owner][spender];
     }
 
-    /// @notice Mints a position for `owner`: liquidity goes into the pool under this manager's address.
+    /// @notice Mints a position for `owner`: liquidity goes into the pool under this manager's address,
+    /// and the NFT starts in sync with the pool position (`mint` in NonfungiblePositionManager).
     function mintPosition(address owner, int24 tickSpacing, int24 tickLower, int24 tickUpper, uint128 liquidity)
         external
         returns (uint256 tokenId, uint256 amount0, uint256 amount1)
     {
         (amount0, amount1) = pool.mint(address(this), tickLower, tickUpper, liquidity, "");
+        (, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128,,) =
+            pool.positions(keccak256(abi.encodePacked(address(this), tickLower, tickUpper)));
         tokenId = nextId++;
         _owners[tokenId] = owner;
-        _positions[tokenId] = Position(token0, token1, tickSpacing, tickLower, tickUpper, liquidity);
+        _positions[tokenId] = Position(
+            token0,
+            token1,
+            tickSpacing,
+            tickLower,
+            tickUpper,
+            liquidity,
+            feeGrowthInside0LastX128,
+            feeGrowthInside1LastX128,
+            0,
+            0
+        );
     }
 
     function safeTransferFrom(address from, address to, uint256 tokenId) external {
@@ -136,21 +173,126 @@ contract MockNftManager {
         _owners[tokenId] = to;
     }
 
+    /// @notice `NonfungiblePositionManager.collect`. Pays `min(max, tokensOwed)` of this NFT from the
+    /// pool position that holds it, after syncing that position (`burn(0)`) and this NFT's snapshot.
     function collect(INonfungiblePositionManager.CollectParams calldata params)
         external
         payable
         returns (uint256 amount0, uint256 amount1)
     {
+        require(params.amount0Max > 0 || params.amount1Max > 0);
+        // allow collecting to the nft position manager address with address 0
+        address recipient = params.recipient == address(0) ? address(this) : params.recipient;
         require(_isAuthorized(msg.sender, params.tokenId), "Not approved");
-        Position storage p = _positions[params.tokenId];
-        address poolOwner = ownerOf(params.tokenId) == pool.gauge() ? pool.gauge() : address(this);
-        if (p.liquidity > 0) {
-            pool.burn(p.tickLower, p.tickUpper, 0, poolOwner);
+
+        Position storage position = _positions[params.tokenId];
+        (uint128 tokensOwed0, uint128 tokensOwed1) = (position.tokensOwed0, position.tokensOwed1);
+
+        address gauge = pool.gauge();
+        bool isStaked = ownerOf(params.tokenId) == gauge;
+
+        // trigger an update of the position fees owed and fee growth snapshots if it has any liquidity
+        if (position.liquidity > 0) {
+            uint256 feeGrowthInside0LastX128;
+            uint256 feeGrowthInside1LastX128;
+            if (!isStaked) {
+                pool.burn(position.tickLower, position.tickUpper, 0, address(this));
+
+                (, feeGrowthInside0LastX128, feeGrowthInside1LastX128,,) =
+                    pool.positions(keccak256(abi.encodePacked(address(this), position.tickLower, position.tickUpper)));
+
+                tokensOwed0 += uint128(
+                    FullMath.mulDiv(
+                        feeGrowthInside0LastX128 - position.feeGrowthInside0LastX128,
+                        position.liquidity,
+                        FixedPoint128.Q128
+                    )
+                );
+                tokensOwed1 += uint128(
+                    FullMath.mulDiv(
+                        feeGrowthInside1LastX128 - position.feeGrowthInside1LastX128,
+                        position.liquidity,
+                        FixedPoint128.Q128
+                    )
+                );
+            } else {
+                pool.burn(position.tickLower, position.tickUpper, 0, gauge);
+
+                (, feeGrowthInside0LastX128, feeGrowthInside1LastX128,,) =
+                    pool.positions(keccak256(abi.encodePacked(gauge, position.tickLower, position.tickUpper)));
+            }
+
+            position.feeGrowthInside0LastX128 = feeGrowthInside0LastX128;
+            position.feeGrowthInside1LastX128 = feeGrowthInside1LastX128;
         }
-        (uint128 a0, uint128 a1) = pool.collect(
-            params.recipient, p.tickLower, p.tickUpper, params.amount0Max, params.amount1Max, poolOwner
+
+        // compute the arguments to give to the pool#collect method
+        (uint128 amount0Collect, uint128 amount1Collect) = (
+            params.amount0Max > tokensOwed0 ? tokensOwed0 : params.amount0Max,
+            params.amount1Max > tokensOwed1 ? tokensOwed1 : params.amount1Max
         );
-        return (a0, a1);
+
+        // the actual amounts collected are returned
+        if (!isStaked) {
+            (amount0, amount1) = pool.collect(
+                recipient, position.tickLower, position.tickUpper, amount0Collect, amount1Collect, address(this)
+            );
+        } else {
+            (amount0, amount1) =
+                pool.collect(recipient, position.tickLower, position.tickUpper, amount0Collect, amount1Collect, gauge);
+        }
+
+        // sometimes there will be a few less wei than expected due to rounding down in core, but we just subtract the full amount expected
+        // instead of the actual amount so we can burn the token
+        (position.tokensOwed0, position.tokensOwed1) = (tokensOwed0 - amount0Collect, tokensOwed1 - amount1Collect);
+    }
+
+    /// @notice `NonfungiblePositionManager.decreaseLiquidity`, without the `deadline` and `amountMin`
+    /// checks. Burns `liquidity` from the pool position that holds the NFT and adds the burned amounts
+    /// and the fees since the snapshot to the NFT's `tokensOwed`. Collect them with `collect`.
+    function decreaseLiquidity(uint256 tokenId, uint128 liquidity) external returns (uint256 amount0, uint256 amount1) {
+        require(liquidity > 0);
+        require(_isAuthorized(msg.sender, tokenId), "Not approved");
+        Position storage position = _positions[tokenId];
+
+        uint128 positionLiquidity = position.liquidity;
+        require(positionLiquidity >= liquidity);
+
+        address gauge = pool.gauge();
+        bool isStaked = ownerOf(tokenId) == gauge;
+        if (!isStaked) {
+            (amount0, amount1) = pool.burn(position.tickLower, position.tickUpper, liquidity, address(this));
+        } else {
+            (amount0, amount1) = pool.burn(position.tickLower, position.tickUpper, liquidity, gauge);
+        }
+
+        // this is now updated to the current transaction
+        (, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128,,) = pool.positions(
+            isStaked
+                ? keccak256(abi.encodePacked(gauge, position.tickLower, position.tickUpper))
+                : keccak256(abi.encodePacked(address(this), position.tickLower, position.tickUpper))
+        );
+
+        position.tokensOwed0 += uint128(amount0);
+        position.tokensOwed1 += uint128(amount1);
+
+        if (!isStaked) {
+            position.tokensOwed0 += uint128(
+                FullMath.mulDiv(
+                    feeGrowthInside0LastX128 - position.feeGrowthInside0LastX128, positionLiquidity, FixedPoint128.Q128
+                )
+            );
+            position.tokensOwed1 += uint128(
+                FullMath.mulDiv(
+                    feeGrowthInside1LastX128 - position.feeGrowthInside1LastX128, positionLiquidity, FixedPoint128.Q128
+                )
+            );
+        }
+
+        position.feeGrowthInside0LastX128 = feeGrowthInside0LastX128;
+        position.feeGrowthInside1LastX128 = feeGrowthInside1LastX128;
+        // subtraction is safe because we checked positionLiquidity is gte liquidity
+        position.liquidity = positionLiquidity - liquidity;
     }
 
     /// @dev Pays the owed tokens of a mint to the pool (the pool checks its balance afterwards).

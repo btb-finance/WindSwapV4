@@ -214,6 +214,18 @@ fn apply(world: &mut World, op: &str, ins: &[&str], now: u32) -> Result<String, 
             .map(|(tid, a0, a1)| triple(&tid, &a0, &a1))
             .map_err(|_| ())
         }
+        "decrease" => {
+            let nft = world.nft.as_mut().ok_or(())?;
+            nft.decrease_liquidity(
+                &mut world.pool,
+                id(ins[0]),
+                u256(ins[1]),
+                ins[2].parse().unwrap(),
+                now,
+            )
+            .map(|(a0, a1)| pair(&a0, &a1))
+            .map_err(|_| ())
+        }
         "approve" => {
             let nft = world.nft.as_mut().ok_or(())?;
             let g = world.gauge.as_ref().ok_or(())?;

@@ -68,6 +68,11 @@ interface IGNft {
         returns (uint256 tokenId, uint256 amount0, uint256 amount1);
     function ownerOrZero(uint256 tokenId) external view returns (address);
     function rangeOf(uint256 tokenId) external view returns (int24 tickLower, int24 tickUpper, bool exists);
+    function positions(uint256 tokenId)
+        external
+        view
+        returns (uint96, address, address, address, int24, int24, int24, uint128, uint256, uint256, uint128, uint128);
+    function decreaseLiquidity(uint256 tokenId, uint128 liquidity) external returns (uint256, uint256);
 }
 
 interface IGVoter {
@@ -165,7 +170,7 @@ contract GenerateClGaugeVectors {
 
     string constant FILE = "vectors/cl_gauge.txt";
     uint256 constant SEGMENTS = 4;
-    uint256 constant OPS_PER_SEG = 500;
+    uint256 constant OPS_PER_SEG = 600;
     uint256 constant NUSERS = 4;
     uint256 constant WEEK = 7 days;
     uint256 constant BASE_TIME = 1_700_000_000;
@@ -682,6 +687,34 @@ contract GenerateClGaugeVectors {
         emitOp("mint", ins, ok, outsU3(ok, tid, a0, a1), t);
     }
 
+    /// decrease: inputs owner,tokenId,liquidity; the owner partially decreases an NFT it holds (not
+    /// staked) by a random part of its liquidity. Outputs the amounts burned from the pool position.
+    /// A token with no liquidity left is decreased by zero, which reverts.
+    function doDecrease() internal {
+        uint256 tid = pickUnstaked();
+        address owner = nft.ownerOrZero(tid);
+        if (owner == address(0)) return;
+        (,,,,,,, uint128 liq,,,,) = nft.positions(tid);
+        uint128 amount = liq == 0 ? 0 : uint128(1 + rand() % uint256(liq));
+        vm.prank(owner);
+        bool ok;
+        uint256 a0;
+        uint256 a1;
+        try nft.decreaseLiquidity(tid, amount) returns (uint256 x, uint256 y) {
+            ok = true;
+            a0 = x;
+            a1 = y;
+        } catch {}
+        string memory outs = ok ? outsU2(true, a0, a1) : "";
+        emitOp(
+            "decrease",
+            string.concat(vm.toString(owner), ",", s(tid), ",", s(uint256(amount))),
+            ok,
+            outs,
+            touchTok(tid, int256(userIndex(owner)))
+        );
+    }
+
     /// approve: inputs user,flag; the user calls setApprovalForAll(gauge, flag) on the NFT manager.
     function doApprove() internal {
         approveOp(rand() % NUSERS, rand() % 20 == 0 ? 0 : 1);
@@ -914,6 +947,7 @@ contract GenerateClGaugeVectors {
         else if (r < 71) doNotifyNoClaim();
         else if (r < 74) doDonate();
         else if (r < 75) doSetAlive();
+        else if (r < 77) doDecrease();
         else doSwap();
     }
 

@@ -38,20 +38,25 @@
 //!   position is `(owner, pool, tick_lower, tick_upper)`, and the value is the NFT id.
 //! - `unstake_position` withdraws the NFT, burns its liquidity back to the owner's range, and pays
 //!   the collected fees and any gauge emissions.
-//! - KNOWN LIMIT: the engine's `PositionManager` pays the owed amounts of the whole pool position
-//!   it shares, not per NFT (see its module docs). Two stakers in one range can therefore collect
-//!   each other's accrued fees. This must be fixed in the engine (per-NFT owed amounts) before
-//!   mainnet. It is not fixed here because the engine logic is out of scope for this change.
+//! - Each NFT has its own liquidity, fee-growth snapshot and owed amounts (the engine's
+//!   `PositionManager`, as NonfungiblePositionManager). A collect pays only the NFT's share of the
+//!   manager's pool position, so NFTs that share a range cannot collect each other's fees. Staked
+//!   NFTs accrue no LP fees (the pool routes them to the gauge). `unstake_position` burns the NFT's
+//!   liquidity and collects its own amounts, then re-mints them to the owner's range.
+//! - The stored manager is the v7 layout. `migrate_nft_positions` converts the v6 one (see there).
 //!
 //! # Rounding
 //! Burn and re-mint round differently, so stake and unstake can move a few wei either way.
 //! Rounding is applied to the caller's balance as a net amount.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use near_sdk::borsh::BorshDeserialize;
 use near_sdk::json_types::U128;
-use near_sdk::{env, ext_contract, near, AccountId, Gas, Promise, PromiseError, PromiseOrValue};
-use windswap_engine::gauge::{ClGauge, GaugeConfig};
+use near_sdk::{
+    env, ext_contract, near, AccountId, Gas, IntoStorageKey, Promise, PromiseError, PromiseOrValue,
+};
+use windswap_engine::gauge::{ClGauge, GaugeConfig, NftPosition, PositionManager};
 use windswap_engine::minter::{EpochEmission, Minter, WEEK};
 use windswap_engine::rebase::{Payout, RewardsDistributor};
 use windswap_engine::ve::VotingEscrow;
@@ -572,24 +577,31 @@ impl Contract {
             (w0, w1, to_u128(reward))
         };
         self.credit(&owner, &wind, reward);
-        let (liquidity, stake_acc) = {
+        // The NFT is back with its owner, holding its liquidity in the manager's pool position. Burn
+        // that liquidity and collect the NFT's own amounts: its principal and its share of the fees.
+        let (liquidity, c0, c1) = {
+            let pool = self
+                .pools
+                .get_mut(&pool_id)
+                .unwrap_or_else(|| env::panic_str("pool does not exist"));
             let nft = self
                 .nft_manager
-                .get()
-                .as_ref()
+                .get_mut()
+                .as_mut()
                 .unwrap_or_else(|| env::panic_str("no nft manager"));
-            (ok_dbg(nft.position(token_id)).liquidity, nft.account)
+            let liquidity = ok_dbg(nft.position(token_id)).liquidity;
+            ok_dbg(nft.decrease_liquidity(pool, owner, token_id, liquidity, time));
+            let (c0, c1) = ok_dbg(nft.collect(pool, owner, token_id, u128::MAX, u128::MAX, time));
+            (liquidity, c0, c1)
         };
-        let (p0, p1, m0, m1) = {
+        // Re-mint the same liquidity into the owner's own range.
+        let (m0, m1) = {
             let pool = self.pool_mut(pool_id);
-            ok(pool.burn(stake_acc, tick_lower, tick_upper, liquidity, time));
-            let (p0, p1) =
-                ok(pool.collect(stake_acc, tick_lower, tick_upper, u128::MAX, u128::MAX));
             let (m0, m1) = ok(pool.mint(owner, tick_lower, tick_upper, liquidity, time));
-            (p0, p1, to_u128(m0), to_u128(m1))
+            (to_u128(m0), to_u128(m1))
         };
-        net_settle(self, &owner, &token0, w0 + p0, m0);
-        net_settle(self, &owner, &token1, w1 + p1, m1);
+        net_settle(self, &owner, &token0, w0 + c0, m0);
+        net_settle(self, &owner, &token1, w1 + c1, m1);
     }
 
     /// Pays the caller's gauge emissions for one staked position. Returns the amount.
@@ -932,8 +944,76 @@ impl Contract {
     }
 }
 
+/// The NFT manager as stored by v6, before per-NFT fee accounting. Field order is the layout of
+/// the deployed state. Only used by `migrate_nft_positions`.
+#[near(serializers = [borsh])]
+pub(crate) struct NftManagerV6 {
+    pub(crate) account: [u8; 32],
+    pub(crate) next_id: U256,
+    pub(crate) positions: BTreeMap<U256, NftPositionV6>,
+    pub(crate) owners: BTreeMap<U256, [u8; 32]>,
+    pub(crate) approvals: BTreeSet<([u8; 32], [u8; 32])>,
+}
+
+/// One NFT of the v6 layout: no fee-growth snapshot and no owed amounts.
+#[near(serializers = [borsh])]
+pub(crate) struct NftPositionV6 {
+    pub(crate) token0: [u8; 32],
+    pub(crate) token1: [u8; 32],
+    pub(crate) tick_spacing: i32,
+    pub(crate) tick_lower: i32,
+    pub(crate) tick_upper: i32,
+    pub(crate) liquidity: u128,
+}
+
 #[near]
 impl Contract {
+    /// Upgrade of the stored NFT manager from v6 to v7, the per-NFT fee accounting. Run once, as a
+    /// call by the contract account, after the v7 wasm is deployed. It returns the number of NFTs.
+    ///
+    /// The v6 NFTs have no snapshot. A staked NFT accrues no fees, and its snapshot is set again by
+    /// the next `unstake_position` before anything reads it. A NFT left unstaked by v6 is not in
+    /// `stakes`, so the contract never collects it. Every snapshot and owed amount starts at zero.
+    /// A second call fails, because the stored bytes are no longer the v6 layout.
+    #[private]
+    pub fn migrate_nft_positions(&mut self) -> u64 {
+        let raw = env::storage_read(&crate::StorageKey::NftManager.into_storage_key())
+            .unwrap_or_else(|| env::panic_str("no nft manager to migrate"));
+        let old = NftManagerV6::try_from_slice(&raw)
+            .unwrap_or_else(|_| env::panic_str("nft manager is not in the v6 layout"));
+        let positions: BTreeMap<U256, NftPosition> = old
+            .positions
+            .into_iter()
+            .map(|(id, p)| {
+                (
+                    id,
+                    NftPosition {
+                        token0: p.token0,
+                        token1: p.token1,
+                        tick_spacing: p.tick_spacing,
+                        tick_lower: p.tick_lower,
+                        tick_upper: p.tick_upper,
+                        liquidity: p.liquidity,
+                        fee_growth_inside0_last: U256::ZERO,
+                        fee_growth_inside1_last: U256::ZERO,
+                        tokens_owed0: 0,
+                        tokens_owed1: 0,
+                    },
+                )
+            })
+            .collect();
+        let count = positions.len() as u64;
+        let manager = PositionManager::from_parts(
+            old.account,
+            old.next_id,
+            positions,
+            old.owners,
+            old.approvals,
+        );
+        self.nft_manager.set(Some(manager));
+        count
+    }
+
     /// Owner only. Sets the WIND token (a NEP-141 account this contract mints). It can be set
     /// once: the lock rows and the minter's balance are keyed by this id.
     pub fn set_wind_token(&mut self, account_id: AccountId) {
