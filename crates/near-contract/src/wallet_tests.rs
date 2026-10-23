@@ -383,7 +383,7 @@ fn wallet_only_evm_user_swaps_with_its_own_balance() {
 
     // BOB relays the signed action and pays the gas.
     ctx(BOB, NOW + 20, 0);
-    let result = c.execute(wallet, action, 1, EXPIRES, sig);
+    let result = c.execute(wallet, action, 1, EXPIRES, sig).value();
     match result {
         ActionResult::Swap([amount0, _]) => assert_eq!(amount0, "100000000"),
         _ => panic!("expected a swap result"),
@@ -430,7 +430,7 @@ fn linked_wallet_acts_for_the_account_balances() {
     };
     let sig = evm_action_sig(&key, SELF, &mint, 2, EXPIRES);
     ctx(BOB, NOW + 20, 0);
-    c.execute(wallet.clone(), mint, 2, EXPIRES, sig);
+    c.execute(wallet.clone(), mint, 2, EXPIRES, sig).detach();
     assert_eq!(
         c.get_position(pool, acct(ALICE), -300, 300).liquidity.0,
         LIQUIDITY / 10
@@ -455,7 +455,7 @@ fn execute_withdraw_evm_debits_and_records_pending_withdrawal() {
     };
     let sig = evm_action_sig(&key, SELF, &action, 1, EXPIRES);
     ctx(BOB, NOW + 20, 0);
-    match c.execute(wallet, action, 1, EXPIRES, sig) {
+    match c.execute(wallet, action, 1, EXPIRES, sig).value() {
         ActionResult::WithdrawEvm(id) => assert_eq!(id, 0),
         _ => panic!("expected a withdrawal id"),
     }
@@ -486,7 +486,7 @@ fn execute_withdraw_evm_rejects_wrong_chain() {
     };
     let sig = evm_action_sig(&key, SELF, &action, 1, EXPIRES);
     ctx(BOB, NOW + 20, 0);
-    c.execute(wallet, action, 1, EXPIRES, sig);
+    c.execute(wallet, action, 1, EXPIRES, sig).detach();
 }
 
 #[test]
@@ -499,7 +499,8 @@ fn execute_rejects_action_changed_after_signing() {
     let signed = swap_action(0, "100");
     let sig = evm_action_sig(&key, SELF, &signed, 1, EXPIRES);
     ctx(BOB, NOW + 20, 0);
-    c.execute(wallet, swap_action(0, "999"), 1, EXPIRES, sig);
+    c.execute(wallet, swap_action(0, "999"), 1, EXPIRES, sig)
+        .detach();
 }
 
 #[test]
@@ -511,7 +512,7 @@ fn execute_rejects_signature_for_another_contract() {
     let action = swap_action(0, "100");
     let sig = evm_action_sig(&key, "other.testnet", &action, 1, EXPIRES);
     ctx(BOB, NOW + 20, 0);
-    c.execute(wallet, action, 1, EXPIRES, sig);
+    c.execute(wallet, action, 1, EXPIRES, sig).detach();
 }
 
 #[test]
@@ -530,8 +531,9 @@ fn execute_rejects_nonce_replay() {
     };
     let sig = evm_action_sig(&key, SELF, &action, 1, EXPIRES);
     ctx(BOB, NOW + 20, 0);
-    c.execute(wallet.clone(), action.clone(), 1, EXPIRES, sig.clone());
-    c.execute(wallet, action, 1, EXPIRES, sig);
+    c.execute(wallet.clone(), action.clone(), 1, EXPIRES, sig.clone())
+        .detach();
+    c.execute(wallet, action, 1, EXPIRES, sig).detach();
 }
 
 #[test]
@@ -543,7 +545,7 @@ fn execute_rejects_expired_action() {
     let action = swap_action(0, "100");
     let sig = evm_action_sig(&key, SELF, &action, 1, EXPIRES);
     ctx(BOB, EXPIRES + 1, 0);
-    c.execute(wallet, action, 1, EXPIRES, sig);
+    c.execute(wallet, action, 1, EXPIRES, sig).detach();
 }
 
 #[test]
@@ -557,5 +559,6 @@ fn execute_rejects_near_wallet() {
         1,
         EXPIRES,
         format!("0x{}", hex(&[0u8; 65])),
-    );
+    )
+    .detach();
 }

@@ -528,6 +528,7 @@ impl Contract {
         self.credit(&owner, &token0, deposit0);
         self.credit(&owner, &token1, deposit1);
         self.stakes.insert(key, token_id);
+        self.stake_index_add(owner, pool_id, tick_lower, tick_upper);
     }
 
     fn set_nft_approval(&mut self, owner: Owner, operator: Owner, approved: bool) {
@@ -590,6 +591,7 @@ impl Contract {
         };
         net_settle(self, &owner, &token0, w0 + p0, m0);
         net_settle(self, &owner, &token1, w1 + p1, m1);
+        self.stake_index_remove(owner, pool_id, tick_lower, tick_upper);
     }
 
     /// Pays the caller's gauge emissions for one staked position. Returns the amount.
@@ -974,10 +976,11 @@ impl Contract {
         self.pending_epoch = None;
     }
 
-    /// Locks `amount` of the caller's WIND for `duration` seconds.
-    pub fn create_lock(&mut self, amount: U128, duration: u64) -> u64 {
+    /// Locks `amount` of the caller's WIND for `duration` seconds. With `permanent` true the lock
+    /// is made permanent in the same call.
+    pub fn create_lock(&mut self, amount: U128, duration: u64, permanent: Option<bool>) -> u64 {
         let owner = owner_of_account(&env::predecessor_account_id());
-        self.lock_create(owner, amount.0, duration)
+        self.lock_create_with(owner, amount.0, duration, permanent.unwrap_or(false))
     }
 
     pub fn increase_amount(&mut self, token_id: u64, amount: U128) {

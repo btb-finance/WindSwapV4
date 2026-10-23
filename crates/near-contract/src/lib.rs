@@ -62,6 +62,7 @@
 
 mod evm;
 mod tokenomics;
+mod views;
 
 use std::collections::BTreeMap;
 
@@ -82,6 +83,7 @@ use accounts::{
     verify_wallet_signature, LinkRegistry, LinkRequest, Owner, WalletId,
 };
 use tokenomics::{PendingEpoch, StakeKey};
+use views::RangeKey;
 use windswap_engine::gauge::{ClGauge, PositionManager};
 use windswap_engine::minter::Minter;
 use windswap_engine::rebase::RewardsDistributor;
@@ -125,6 +127,11 @@ enum StorageKey {
     Stakes,
     /// The NFT manager of the staked positions.
     NftManager,
+    // Appended after v6 (the owner indexes, see `views`).
+    PositionsByOwner,
+    StakesByOwner,
+    WithdrawalsByOwner,
+    BalanceTokensByOwner,
 }
 
 #[near(contract_state)]
@@ -192,12 +199,22 @@ pub struct Contract {
     wind_minted: u128,
     /// The epoch whose mint is in flight, if any. See `tokenomics`.
     pending_epoch: Option<PendingEpoch>,
+    // Appended after v6. Owner indexes for the owner-addressed views (see `views`). They start
+    // empty at `migrate` and are filled by the `backfill_*` calls.
+    /// Position ranges per owner that have liquidity, owed fees or a stake.
+    positions_by_owner: LookupMap<Owner, Vec<RangeKey>>,
+    /// Staked position ranges per owner.
+    stakes_by_owner: LookupMap<Owner, Vec<RangeKey>>,
+    /// Withdrawal ids per owner, in creation order.
+    withdrawals_by_owner: LookupMap<Owner, Vec<u64>>,
+    /// Tokens with a nonzero internal balance, per owner.
+    balance_tokens_by_owner: LookupMap<Owner, Vec<String>>,
 }
 
-/// State layout of the deployed testnet contract (v5): the `Contract` struct before the ve(3,3)
-/// state. Only used by `migrate`. Field order and types must match the deployed state exactly.
+/// State layout of the deployed testnet contract (v6): the `Contract` struct before the owner
+/// indexes. Only used by `migrate`. Field order and types must match the deployed state exactly.
 #[near(serializers = [borsh])]
-struct ContractV5 {
+struct ContractV6 {
     owner: AccountId,
     fee_config: FeeConfig,
     pools: IterableMap<u64, ClPool>,
@@ -216,7 +233,20 @@ struct ContractV5 {
     evm_asset_by_token: LookupMap<String, String>,
     evm_chains: LookupMap<u64, EvmChain>,
     evm_deposits: LookupSet<(u64, [u8; 32], u32)>,
+    evm_deposits_by_asset: LookupSet<(u64, [u8; 32], u32, String)>,
     has_state: LookupSet<Owner>,
+    wind_token: Option<AccountId>,
+    ve: LazyOption<VotingEscrow>,
+    voter: LazyOption<Voter>,
+    minter: LazyOption<Minter>,
+    distributor: LazyOption<RewardsDistributor>,
+    gauges: LookupMap<u64, ClGauge>,
+    stakes: LookupMap<StakeKey, U256>,
+    nft_manager: LazyOption<PositionManager>,
+    wind_genesis_done: bool,
+    wind_genesis_pending: bool,
+    wind_minted: u128,
+    pending_epoch: Option<PendingEpoch>,
 }
 
 #[derive(Clone)]
@@ -418,8 +448,14 @@ pub enum SignedAction {
         to_chain_id: u64,
         to_address: String,
     },
-    /// As `create_lock`.
-    CreateLock { amount: U128, duration: u64 },
+    /// As `create_lock`. `permanent` makes the lock permanent in the same step. It is left out
+    /// of the JSON when false, so the message of a client that predates it is unchanged.
+    CreateLock {
+        amount: U128,
+        duration: u64,
+        #[serde(default, skip_serializing_if = "is_false")]
+        permanent: bool,
+    },
     /// As `increase_amount`.
     IncreaseAmount { token_id: u64, amount: U128 },
     /// As `increase_unlock_time`.
@@ -480,6 +516,13 @@ pub enum SignedAction {
     },
     /// As `claim_rebase`.
     ClaimRebase { token_id: u64 },
+    /// As `distribute`. Runs the weekly epoch flip if it is due. Its result is `execute`'s
+    /// promise, or `Amount` when no mint is needed.
+    Distribute,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// What `execute` returns, one variant per `SignedAction`.
@@ -822,6 +865,9 @@ impl Contract {
             .checked_add(amount)
             .unwrap_or_else(|| env::panic_str("balance overflow"));
         self.balances.insert(key, next);
+        if current == 0 {
+            self.index_token_added(owner, token);
+        }
     }
 
     fn debit(&mut self, owner: &Owner, token: &str, amount: u128) {
@@ -837,6 +883,7 @@ impl Contract {
         });
         if next == 0 {
             self.balances.remove(&key);
+            self.index_token_removed(owner, token);
         } else {
             self.balances.insert(key, next);
         }
@@ -1019,6 +1066,7 @@ impl Contract {
         };
         self.debit(&owner, &token0, to_u128(amount0));
         self.debit(&owner, &token1, to_u128(amount1));
+        self.sync_position_index(owner, pool_id, tick_lower, tick_upper);
         [amount0.to_string(), amount1.to_string()]
     }
 
@@ -1035,6 +1083,7 @@ impl Contract {
             let pool = self.pool_mut(pool_id);
             ok(pool.burn(owner, tick_lower, tick_upper, liquidity, now()))
         };
+        self.sync_position_index(owner, pool_id, tick_lower, tick_upper);
         [amount0.to_string(), amount1.to_string()]
     }
 
@@ -1052,6 +1101,7 @@ impl Contract {
         };
         self.credit(&owner, &token0, amount0);
         self.credit(&owner, &token1, amount1);
+        self.sync_position_index(owner, pool_id, tick_lower, tick_upper);
         [U128(amount0), U128(amount1)]
     }
 
@@ -1089,6 +1139,7 @@ impl Contract {
                 signing_nonce: None,
             },
         );
+        self.index_withdrawal(owner, id);
         env::log_str(&format!(
             "withdrawal {id} recorded: {amount} {token_id} to chain {}",
             asset.chain_id
@@ -1170,9 +1221,11 @@ impl Contract {
                     &to_address,
                 ))
             }
-            SignedAction::CreateLock { amount, duration } => {
-                ActionResult::TokenId(self.lock_create(owner, amount.0, duration))
-            }
+            SignedAction::CreateLock {
+                amount,
+                duration,
+                permanent,
+            } => ActionResult::TokenId(self.lock_create_with(owner, amount.0, duration, permanent)),
             SignedAction::IncreaseAmount { token_id, amount } => {
                 self.lock_increase_amount(owner, token_id, amount.0);
                 ActionResult::Done
@@ -1273,6 +1326,8 @@ impl Contract {
             SignedAction::ClaimRebase { token_id } => {
                 ActionResult::Amount(U128(self.claim_rebase_for(token_id)))
             }
+            // `execute` runs `distribute` itself, since it may return a promise.
+            SignedAction::Distribute => env::panic_str("distribute is run by execute"),
         }
     }
 }
@@ -1317,27 +1372,26 @@ impl Contract {
             wind_genesis_pending: false,
             wind_minted: 0,
             pending_epoch: None,
+            positions_by_owner: LookupMap::new(StorageKey::PositionsByOwner),
+            stakes_by_owner: LookupMap::new(StorageKey::StakesByOwner),
+            withdrawals_by_owner: LookupMap::new(StorageKey::WithdrawalsByOwner),
+            balance_tokens_by_owner: LookupMap::new(StorageKey::BalanceTokensByOwner),
         }
     }
 
-    /// Upgrade from the deployed testnet state (v5, the layout before the ve(3,3) state) to v6.
+    /// Upgrade from the deployed testnet state (v6, the layout before the owner indexes) to v7.
     /// Run once, as the init call of the redeploy:
     /// `near contract deploy <acct> use-file <wasm> with-init-call migrate json-args '{}'`.
     ///
-    /// Everything in v5 is kept (balances, pools, withdrawals, bridge state). The v5 balances
-    /// cannot be copied here (a `LookupMap` cannot be iterated), so they stay where they are, as
-    /// before. The ve(3,3) state starts fresh at the migration time: no locks, no gauges, no WIND
-    /// token (set it with `set_wind_token`), and no minted supply. Owners that already hold balances
-    /// under their own wallet id are not known to this call (see `flag_wallet_state`).
+    /// Everything in v6 is kept, including the ve(3,3) state, gauges, stakes and withdrawals.
+    /// The four owner indexes are new and start empty. Fill them with the `backfill_*` calls
+    /// (see `views`) before the owner-addressed views are used.
     /// Only the contract account can call it (`#[private]`).
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
-        let old: ContractV5 =
+        let old: ContractV6 =
             env::state_read().unwrap_or_else(|| env::panic_str("no contract state to migrate"));
-        let (ve, voter, minter, distributor) =
-            tokenomics::fresh_state(&old.owner, now_secs(), env::block_height());
-        let nft_manager = PositionManager::new(tokenomics::nft_manager_account());
         Self {
             owner: old.owner,
             fee_config: old.fee_config,
@@ -1357,20 +1411,24 @@ impl Contract {
             evm_asset_by_token: old.evm_asset_by_token,
             evm_chains: old.evm_chains,
             evm_deposits: old.evm_deposits,
-            evm_deposits_by_asset: LookupSet::new(StorageKey::EvmDepositsByAsset),
+            evm_deposits_by_asset: old.evm_deposits_by_asset,
             has_state: old.has_state,
-            wind_token: None,
-            ve: LazyOption::new(StorageKey::Ve, Some(ve)),
-            voter: LazyOption::new(StorageKey::Voter, Some(voter)),
-            minter: LazyOption::new(StorageKey::Minter, Some(minter)),
-            distributor: LazyOption::new(StorageKey::Distributor, Some(distributor)),
-            gauges: LookupMap::new(StorageKey::Gauges),
-            stakes: LookupMap::new(StorageKey::Stakes),
-            nft_manager: LazyOption::new(StorageKey::NftManager, Some(nft_manager)),
-            wind_genesis_done: false,
-            wind_genesis_pending: false,
-            wind_minted: 0,
-            pending_epoch: None,
+            wind_token: old.wind_token,
+            ve: old.ve,
+            voter: old.voter,
+            minter: old.minter,
+            distributor: old.distributor,
+            gauges: old.gauges,
+            stakes: old.stakes,
+            nft_manager: old.nft_manager,
+            wind_genesis_done: old.wind_genesis_done,
+            wind_genesis_pending: old.wind_genesis_pending,
+            wind_minted: old.wind_minted,
+            pending_epoch: old.pending_epoch,
+            positions_by_owner: LookupMap::new(StorageKey::PositionsByOwner),
+            stakes_by_owner: LookupMap::new(StorageKey::StakesByOwner),
+            withdrawals_by_owner: LookupMap::new(StorageKey::WithdrawalsByOwner),
+            balance_tokens_by_owner: LookupMap::new(StorageKey::BalanceTokensByOwner),
         }
     }
 
@@ -1882,7 +1940,7 @@ impl Contract {
         nonce: u64,
         expires: u64,
         signature: String,
-    ) -> ActionResult {
+    ) -> PromiseOrValue<ActionResult> {
         let wallet = parse_wallet(&wallet);
         if now_secs() > expires {
             env::panic_str("action has expired");
@@ -1903,7 +1961,16 @@ impl Contract {
             env::panic_str("action nonce was already used for this wallet");
         }
         let owner = self.links.resolve(&wallet);
-        self.dispatch(owner, action)
+        if matches!(action, SignedAction::Distribute) {
+            // `distribute` may return a promise (the epoch's mint), which `execute` passes on.
+            return match self.distribute_epoch() {
+                PromiseOrValue::Promise(promise) => PromiseOrValue::Promise(promise),
+                PromiseOrValue::Value(amount) => {
+                    PromiseOrValue::Value(ActionResult::Amount(amount))
+                }
+            };
+        }
+        PromiseOrValue::Value(self.dispatch(owner, action))
     }
 
     /// Withdraws `amount` of the EVM asset `token_id` to `to_address` (0x) on the asset's chain.
@@ -2389,5 +2456,21 @@ mod bridge_tests;
 mod tests;
 #[cfg(test)]
 mod tokenomics_tests;
+
+/// Test helper: the value of an `execute` result that must not be a promise.
+#[cfg(test)]
+trait ExpectValue<T> {
+    fn value(self) -> T;
+}
+
+#[cfg(test)]
+impl<T> ExpectValue<T> for PromiseOrValue<T> {
+    fn value(self) -> T {
+        match self {
+            PromiseOrValue::Value(v) => v,
+            PromiseOrValue::Promise(_) => panic!("expected a value, got a promise"),
+        }
+    }
+}
 #[cfg(test)]
 mod wallet_tests;
