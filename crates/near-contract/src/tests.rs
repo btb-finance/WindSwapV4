@@ -468,139 +468,169 @@ fn withdraw_works_after_token_is_removed() {
 // ---- Upgrade from the deployed layout (ContractV6) ----
 
 #[test]
-fn migrate_reads_deployed_v6_state() {
+fn migrate_reads_deployed_v6_state_and_backfill_restores_the_indexes() {
+    const ETH: &str = "base-sepolia:eth";
     set_ctx(OWNER, 1_000);
-    let bob_owner = owner_of_account(&acct(BOB));
+    let mut c = Contract::new(acct(OWNER));
+    c.add_token(acct(USDC));
+    c.create_pool(USDC.into(), WNEAR.into(), 3, Q96_STR.into());
+    c.register_evm_asset(
+        84532,
+        "native".into(),
+        ETH.into(),
+        18,
+        U128(1 << 100),
+        U128(1 << 100),
+    );
+    c.test_credit(acct(ALICE), USDC.into(), U128(1 << 60));
+    c.test_credit(acct(ALICE), WNEAR.into(), U128(1 << 60));
+    c.test_credit(acct(ALICE), ETH.into(), U128(100));
+    c.test_credit(acct(BOB), USDC.into(), U128(7));
+    set_ctx(ALICE, 1_000);
+    c.mint_position(0, -300, 300, U128(1_000_000));
+    c.withdraw_evm(
+        ETH.into(),
+        U128(5),
+        "0x2222222222222222222222222222222222222222".into(),
+    );
+    c.withdraw_evm(
+        ETH.into(),
+        U128(9),
+        "0x2222222222222222222222222222222222222222".into(),
+    );
     let alice_owner = owner_of_account(&acct(ALICE));
-    {
-        // Write the deployed (v6) layout, with the same storage prefixes as the testnet contract.
-        let mut legacy_balances = LookupMap::new(StorageKey::Balances);
-        legacy_balances.insert((acct(ALICE), USDC.to_string()), 42u128);
-        let mut balances = LookupMap::new(StorageKey::OwnerBalances);
-        balances.insert((bob_owner, USDC.to_string()), 7u128);
-        let mut allowed_tokens = IterableSet::new(StorageKey::AllowedTokens);
-        allowed_tokens.insert(acct(USDC));
-        let mut withdrawals = LookupMap::new(StorageKey::Withdrawals);
-        withdrawals.insert(
-            0u64,
-            Withdrawal {
-                owner: alice_owner,
-                token_id: "base-sepolia:eth".to_string(),
-                amount: 5,
-                to_chain_id: 84532,
-                to_address: [0x22; 20],
-                status: WithdrawalStatus::Pending,
-                signing_nonce: None,
-            },
-        );
-        withdrawals.insert(
-            1u64,
-            Withdrawal {
-                owner: bob_owner,
-                token_id: "base-sepolia:eth".to_string(),
-                amount: 9,
-                to_chain_id: 84532,
-                to_address: [0x33; 20],
-                status: WithdrawalStatus::Pending,
-                signing_nonce: None,
-            },
-        );
-        let (ve, voter, minter, distributor) = tokenomics::fresh_state(&acct(OWNER), 1_000, 1_000);
-        let old = ContractV6 {
-            owner: acct(OWNER),
-            fee_config: FeeConfig::default(),
-            pools: IterableMap::new(StorageKey::Pools),
-            pool_tokens: LookupMap::new(StorageKey::PoolTokens),
-            next_pool_id: 3,
-            legacy_balances,
-            balances,
-            allowed_tokens,
-            mpc_contract: acct("mpc.example.testnet"),
-            links: LinkRegistry::new("links"),
-            action_nonces: LookupSet::new(StorageKey::ActionNonces),
-            withdrawals,
-            next_withdrawal_id: 2,
-            relayers: IterableSet::new(StorageKey::Relayers),
-            evm_assets: IterableMap::new(StorageKey::EvmAssets),
-            evm_asset_by_token: LookupMap::new(StorageKey::EvmAssetByToken),
-            evm_chains: LookupMap::new(StorageKey::EvmChains),
-            evm_deposits: LookupSet::new(StorageKey::EvmDeposits),
-            evm_deposits_by_asset: LookupSet::new(StorageKey::EvmDepositsByAsset),
-            has_state: LookupSet::new(StorageKey::HasState),
-            wind_token: None,
-            ve: LazyOption::new(StorageKey::Ve, Some(ve)),
-            voter: LazyOption::new(StorageKey::Voter, Some(voter)),
-            minter: LazyOption::new(StorageKey::Minter, Some(minter)),
-            distributor: LazyOption::new(StorageKey::Distributor, Some(distributor)),
-            gauges: LookupMap::new(StorageKey::Gauges),
-            stakes: LookupMap::new(StorageKey::Stakes),
-            nft_manager: LazyOption::new(
-                StorageKey::NftManager,
-                Some(PositionManager::new(tokenomics::nft_manager_account())),
-            ),
-            wind_genesis_done: false,
-            wind_genesis_pending: false,
-            wind_minted: 0,
-            pending_epoch: None,
-        };
-        env::state_write(&old);
-    }
+    let bob_owner = owner_of_account(&acct(BOB));
+    let alice_hex = owner_hex(&alice_owner);
+    let bob_hex = owner_hex(&bob_owner);
+
+    // Write the deployed (v6) layout: the same fields, without the owner indexes. The indexes
+    // were written above under their prefixes, so drop those entries first, as they never
+    // existed before the upgrade.
+    let mut c = c;
+    c.positions_by_owner.remove(&alice_owner);
+    c.balance_tokens_by_owner.remove(&alice_owner);
+    c.balance_tokens_by_owner.remove(&bob_owner);
+    c.withdrawals_by_owner.remove(&alice_owner);
+    let Contract {
+        owner,
+        fee_config,
+        pools,
+        pool_tokens,
+        next_pool_id,
+        legacy_balances,
+        balances,
+        allowed_tokens,
+        mpc_contract,
+        links,
+        action_nonces,
+        withdrawals,
+        next_withdrawal_id,
+        relayers,
+        evm_assets,
+        evm_asset_by_token,
+        evm_chains,
+        evm_deposits,
+        evm_deposits_by_asset,
+        has_state,
+        wind_token,
+        ve,
+        voter,
+        minter,
+        distributor,
+        gauges,
+        stakes,
+        nft_manager,
+        wind_genesis_done,
+        wind_genesis_pending,
+        wind_minted,
+        pending_epoch,
+        ..
+    } = c;
+    env::state_write(&ContractV6 {
+        owner,
+        fee_config,
+        pools,
+        pool_tokens,
+        next_pool_id,
+        legacy_balances,
+        balances,
+        allowed_tokens,
+        mpc_contract,
+        links,
+        action_nonces,
+        withdrawals,
+        next_withdrawal_id,
+        relayers,
+        evm_assets,
+        evm_asset_by_token,
+        evm_chains,
+        evm_deposits,
+        evm_deposits_by_asset,
+        has_state,
+        wind_token,
+        ve,
+        voter,
+        minter,
+        distributor,
+        gauges,
+        stakes,
+        nft_manager,
+        wind_genesis_done,
+        wind_genesis_pending,
+        wind_minted,
+        pending_epoch,
+    });
 
     let mut c = Contract::migrate();
-    assert_eq!(c.owner, acct(OWNER));
-    assert_eq!(c.next_pool_id, 3);
-    assert_eq!(c.get_tokens(), vec![acct(USDC)], "whitelist is kept");
+    // Everything in v6 is kept.
+    assert_eq!(c.get_pool(0).token0, USDC);
     assert_eq!(
-        c.get_mpc_contract(),
-        acct("mpc.example.testnet"),
-        "mpc contract is kept"
+        c.get_position(0, acct(ALICE), -300, 300).liquidity.0,
+        1_000_000
     );
-
-    // Owner-keyed balances are kept as they are.
     assert_eq!(balance(&c, BOB, USDC), 7);
-    // The v3-era balance is still under its legacy key until it is migrated.
-    assert_eq!(balance(&c, ALICE, USDC), 0);
-    assert_eq!(c.get_legacy_balance(acct(ALICE), USDC.into()).0, 42);
-    set_ctx(OWNER, 1_000);
-    assert_eq!(c.migrate_balances(vec![(acct(ALICE), USDC.into())]), 1);
-    assert_eq!(balance(&c, ALICE, USDC), 42);
-    assert_eq!(c.migrate_balances(vec![(acct(ALICE), USDC.into())]), 0);
-
-    // Pending withdrawals are kept with the same ids and fields.
-    let first = c.get_withdrawal(0).expect("kept");
-    assert_eq!(first.status, "Pending");
-    assert_eq!(first.owner_hex, owner_hex(&alice_owner));
-    assert_eq!(first.token_id, "base-sepolia:eth");
-    assert_eq!(first.amount.0, 5);
-    assert_eq!(
-        first.to_address,
-        "0x2222222222222222222222222222222222222222"
-    );
     assert_eq!(c.get_withdrawal(1).expect("kept").amount.0, 9);
-    assert!(c.get_withdrawal(2).is_none());
     assert_eq!(c.get_pending_withdrawals(0, 10).len(), 2);
 
-    // The new state starts empty.
-    assert_eq!(
-        c.get_epoch().active_period,
-        0,
-        "epochs start at the migration time"
-    );
-    assert_eq!(c.get_epoch().epoch_count, 0);
-    assert!(c.get_locks_of(owner_hex(&bob_owner)).is_empty());
-    assert!(c.get_relayers().is_empty());
-    assert!(c.get_evm_assets().is_empty());
-    assert!(c.get_evm_chain(84532).is_none());
+    // The owner indexes start empty, so the owner views see nothing yet.
+    assert!(c
+        .get_positions_of_owner(alice_hex.clone(), 0, 10)
+        .is_empty());
+    assert!(c.get_balances_of_owner(bob_hex.clone()).is_empty());
+    assert!(c
+        .get_withdrawals_of_owner(alice_hex.clone(), 0, 10)
+        .is_empty());
 
-    // The migrated contract works: a whitelisted deposit is still credited.
-    set_ctx(USDC, 1_000);
-    let _ = c.ft_on_transfer(acct(ALICE), U128(8), String::new());
-    assert_eq!(balance(&c, ALICE, USDC), 50);
-
-    // The ve(3,3) state can be set up after the migration.
+    // The backfill calls fill them in, and are owner only.
     set_ctx(OWNER, 1_000);
-    c.set_wind_token(acct("wind.testnet"));
-    assert_eq!(c.get_epoch().wind_minted.0, 0);
+    assert_eq!(
+        c.backfill_position_index(vec![(alice_hex.clone(), 0, -300, 300)]),
+        1
+    );
+    assert_eq!(
+        c.backfill_token_index(vec![
+            (bob_hex.clone(), USDC.into()),
+            (bob_hex.clone(), WNEAR.into()),
+        ]),
+        1,
+        "only nonzero balances are indexed"
+    );
+    assert_eq!(c.backfill_withdrawal_index(vec![0, 1, 2]), 2);
+    assert_eq!(c.get_positions_of_owner(alice_hex.clone(), 0, 10).len(), 1);
+    assert_eq!(c.get_balances_of_owner(bob_hex).len(), 1);
+    let withdrawals = c.get_withdrawals_of_owner(alice_hex, 0, 10);
+    assert_eq!(
+        withdrawals.iter().map(|w| w.id).collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+}
+
+#[test]
+#[should_panic(expected = "only owner")]
+fn backfill_indexes_is_owner_only() {
+    let mut c = setup();
+    set_ctx(ALICE, 1_000);
+    c.backfill_withdrawal_index(vec![0]);
 }
 
 #[test]

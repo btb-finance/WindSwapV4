@@ -63,6 +63,7 @@
 mod accounting;
 mod evm;
 mod tokenomics;
+mod views;
 
 use std::collections::BTreeMap;
 
@@ -84,6 +85,7 @@ use accounts::{
     verify_wallet_signature, LinkRegistry, LinkRequest, Owner, WalletId,
 };
 use tokenomics::{PendingEpoch, StakeKey};
+use views::RangeKey;
 use windswap_engine::gauge::{ClGauge, PositionManager};
 use windswap_engine::minter::Minter;
 use windswap_engine::rebase::RewardsDistributor;
@@ -135,6 +137,11 @@ enum StorageKey {
     ReservesSeeded,
     PendingOwed,
     Unbacked,
+    // Appended after v6 (the owner indexes, see `views`).
+    PositionsByOwner,
+    StakesByOwner,
+    WithdrawalsByOwner,
+    BalanceTokensByOwner,
 }
 
 #[near(contract_state)]
@@ -221,6 +228,16 @@ pub struct Contract {
     pending_withdrawals: LookupMap<String, u128>,
     /// Per token: faucet credit (`test_credit`) that no deposit backs.
     unbacked: LookupMap<String, u128>,
+    // Appended after v6. Owner indexes for the owner-addressed views (see `views`). They start
+    // empty at `migrate` and are filled by the `backfill_*` calls.
+    /// Position ranges per owner that have liquidity, owed fees or a stake.
+    positions_by_owner: LookupMap<Owner, Vec<RangeKey>>,
+    /// Staked position ranges per owner.
+    stakes_by_owner: LookupMap<Owner, Vec<RangeKey>>,
+    /// Withdrawal ids per owner, in creation order.
+    withdrawals_by_owner: LookupMap<Owner, Vec<u64>>,
+    /// Tokens with a nonzero internal balance, per owner.
+    balance_tokens_by_owner: LookupMap<Owner, Vec<String>>,
 }
 
 /// State layout of the deployed testnet contract (v6): the `Contract` struct before the solvency
@@ -461,8 +478,14 @@ pub enum SignedAction {
         to_chain_id: u64,
         to_address: String,
     },
-    /// As `create_lock`.
-    CreateLock { amount: U128, duration: u64 },
+    /// As `create_lock`. `permanent` makes the lock permanent in the same step. It is left out
+    /// of the JSON when false, so the message of a client that predates it is unchanged.
+    CreateLock {
+        amount: U128,
+        duration: u64,
+        #[serde(default, skip_serializing_if = "is_false")]
+        permanent: bool,
+    },
     /// As `increase_amount`.
     IncreaseAmount { token_id: u64, amount: U128 },
     /// As `increase_unlock_time`.
@@ -523,6 +546,13 @@ pub enum SignedAction {
     },
     /// As `claim_rebase`.
     ClaimRebase { token_id: u64 },
+    /// As `distribute`. Runs the weekly epoch flip if it is due. Its result is `execute`'s
+    /// promise, or `Amount` when no mint is needed.
+    Distribute,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// What `execute` returns, one variant per `SignedAction`.
@@ -867,6 +897,9 @@ impl Contract {
             .unwrap_or_else(|| env::panic_str("balance overflow"));
         self.liability_add(&key, current, amount);
         self.balances.insert(key, next);
+        if current == 0 {
+            self.index_token_added(owner, token);
+        }
     }
 
     /// The only writer of a debited balance. Also updates `liabilities` (see `accounting`).
@@ -884,6 +917,7 @@ impl Contract {
         self.liability_sub(&key, current, amount);
         if next == 0 {
             self.balances.remove(&key);
+            self.index_token_removed(owner, token);
         } else {
             self.balances.insert(key, next);
         }
@@ -1123,6 +1157,7 @@ impl Contract {
         self.debit(&owner, &token1, to_u128(amount1));
         self.reserve_in(Flow::Mint, pool_id, &token0, to_u128(amount0));
         self.reserve_in(Flow::Mint, pool_id, &token1, to_u128(amount1));
+        self.sync_position_index(owner, pool_id, tick_lower, tick_upper);
         [amount0.to_string(), amount1.to_string()]
     }
 
@@ -1141,6 +1176,7 @@ impl Contract {
             let pool = self.pool_mut(pool_id);
             ok(pool.burn(owner, tick_lower, tick_upper, liquidity, now()))
         };
+        self.sync_position_index(owner, pool_id, tick_lower, tick_upper);
         [amount0.to_string(), amount1.to_string()]
     }
 
@@ -1160,6 +1196,7 @@ impl Contract {
         self.credit(&owner, &token1, amount1);
         self.reserve_out(Flow::Collect, pool_id, &token0, amount0);
         self.reserve_out(Flow::Collect, pool_id, &token1, amount1);
+        self.sync_position_index(owner, pool_id, tick_lower, tick_upper);
         [U128(amount0), U128(amount1)]
     }
 
@@ -1198,6 +1235,7 @@ impl Contract {
                 signing_nonce: None,
             },
         );
+        self.index_withdrawal(owner, id);
         env::log_str(&format!(
             "withdrawal {id} recorded: {amount} {token_id} to chain {}",
             asset.chain_id
@@ -1279,9 +1317,11 @@ impl Contract {
                     &to_address,
                 ))
             }
-            SignedAction::CreateLock { amount, duration } => {
-                ActionResult::TokenId(self.lock_create(owner, amount.0, duration))
-            }
+            SignedAction::CreateLock {
+                amount,
+                duration,
+                permanent,
+            } => ActionResult::TokenId(self.lock_create_with(owner, amount.0, duration, permanent)),
             SignedAction::IncreaseAmount { token_id, amount } => {
                 self.lock_increase_amount(owner, token_id, amount.0);
                 ActionResult::Done
@@ -1382,6 +1422,8 @@ impl Contract {
             SignedAction::ClaimRebase { token_id } => {
                 ActionResult::Amount(U128(self.claim_rebase_for(token_id)))
             }
+            // `execute` runs `distribute` itself, since it may return a promise.
+            SignedAction::Distribute => env::panic_str("distribute is run by execute"),
         }
     }
 }
@@ -1434,6 +1476,10 @@ impl Contract {
             reserves_seeded: LookupSet::new(StorageKey::ReservesSeeded),
             pending_withdrawals: LookupMap::new(StorageKey::PendingOwed),
             unbacked: LookupMap::new(StorageKey::Unbacked),
+            positions_by_owner: LookupMap::new(StorageKey::PositionsByOwner),
+            stakes_by_owner: LookupMap::new(StorageKey::StakesByOwner),
+            withdrawals_by_owner: LookupMap::new(StorageKey::WithdrawalsByOwner),
+            balance_tokens_by_owner: LookupMap::new(StorageKey::BalanceTokensByOwner),
         }
     }
 
@@ -1445,6 +1491,7 @@ impl Contract {
     /// `LookupMap` cannot be iterated, and pool reserves are not stored), so the owner seeds them
     /// with `seed_accounting` and `seed_pool_reserves`. Until then `get_token_accounting` reports
     /// `migrated: true` and totals that are incomplete. The pending EVM withdrawals are summed here.
+    /// The four owner indexes (see `views`) also start empty; fill them with the `backfill_*` calls.
     /// Only the contract account can call it (`#[private]`).
     #[private]
     #[init(ignore_state)]
@@ -1485,6 +1532,10 @@ impl Contract {
             wind_genesis_pending: old.wind_genesis_pending,
             wind_minted: old.wind_minted,
             pending_epoch: old.pending_epoch,
+            positions_by_owner: LookupMap::new(StorageKey::PositionsByOwner),
+            stakes_by_owner: LookupMap::new(StorageKey::StakesByOwner),
+            withdrawals_by_owner: LookupMap::new(StorageKey::WithdrawalsByOwner),
+            balance_tokens_by_owner: LookupMap::new(StorageKey::BalanceTokensByOwner),
             liabilities: LookupMap::new(StorageKey::Liabilities),
             accounted: LookupSet::new(StorageKey::Accounted),
             needs_seed: true,
@@ -2020,7 +2071,7 @@ impl Contract {
         nonce: u64,
         expires: u64,
         signature: String,
-    ) -> ActionResult {
+    ) -> PromiseOrValue<ActionResult> {
         let wallet = parse_wallet(&wallet);
         if now_secs() > expires {
             env::panic_str("action has expired");
@@ -2041,7 +2092,16 @@ impl Contract {
             env::panic_str("action nonce was already used for this wallet");
         }
         let owner = self.links.resolve(&wallet);
-        self.dispatch(owner, action)
+        if matches!(action, SignedAction::Distribute) {
+            // `distribute` may return a promise (the epoch's mint), which `execute` passes on.
+            return match self.distribute_epoch() {
+                PromiseOrValue::Promise(promise) => PromiseOrValue::Promise(promise),
+                PromiseOrValue::Value(amount) => {
+                    PromiseOrValue::Value(ActionResult::Amount(amount))
+                }
+            };
+        }
+        PromiseOrValue::Value(self.dispatch(owner, action))
     }
 
     /// Withdraws `amount` of the EVM asset `token_id` to `to_address` (0x) on the asset's chain.
@@ -2531,5 +2591,21 @@ mod bridge_tests;
 mod tests;
 #[cfg(test)]
 mod tokenomics_tests;
+
+/// Test helper: the value of an `execute` result that must not be a promise.
+#[cfg(test)]
+trait ExpectValue<T> {
+    fn value(self) -> T;
+}
+
+#[cfg(test)]
+impl<T> ExpectValue<T> for PromiseOrValue<T> {
+    fn value(self) -> T {
+        match self {
+            PromiseOrValue::Value(v) => v,
+            PromiseOrValue::Promise(_) => panic!("expected a value, got a promise"),
+        }
+    }
+}
 #[cfg(test)]
 mod wallet_tests;

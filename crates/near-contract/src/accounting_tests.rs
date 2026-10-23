@@ -415,7 +415,7 @@ impl Sim {
         let duration = WEEK * self.rng.range(1, 4) as u64;
         self.ensure(user, WIND, amount);
         ctx(user, self.now, 0);
-        let token = self.c.create_lock(U128(amount), duration);
+        let token = self.c.create_lock(U128(amount), duration, None);
         let end = self.c.get_lock(token).expect("lock").end;
         self.l.sub(user, WIND, amount);
         self.l.locks.insert(token, LockRec { user, amount, end });
@@ -711,7 +711,7 @@ fn gauge_cycle_keeps_holdings_equal_to_total_owed() {
     // ALICE locks WIND, provides liquidity and stakes it.
     deposit(&mut c, &mut held, ALICE, WIND, 1_000 * E18);
     ctx(ALICE, T0 + 10, 0);
-    let token = c.create_lock(U128(1_000 * E18), 4 * WEEK);
+    let token = c.create_lock(U128(1_000 * E18), 4 * WEEK, None);
     deposit(&mut c, &mut held, ALICE, USDC, 10 * E18);
     deposit(&mut c, &mut held, ALICE, WNEAR, 10 * E18);
     ctx(ALICE, T0 + 20, 0);

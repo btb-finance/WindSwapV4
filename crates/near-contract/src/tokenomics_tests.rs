@@ -109,7 +109,7 @@ fn amount_of(paid: &[(String, U128)], token: &str) -> u128 {
 fn alice_locks_and_provides(c: &mut Contract) -> u64 {
     fund(c, ALICE, WIND, 1_000 * E18);
     ctx(ALICE, T0 + 10, 0);
-    let token = c.create_lock(U128(1_000 * E18), 4 * WEEK);
+    let token = c.create_lock(U128(1_000 * E18), 4 * WEEK, None);
     fund(c, ALICE, USDC, 10 * E18);
     fund(c, ALICE, WNEAR, 10 * E18);
     ctx(ALICE, T0 + 20, 0);
@@ -231,7 +231,7 @@ fn withdraw_after_expiry_credits_the_wind_back() {
     let mut c = setup();
     fund(&mut c, ALICE, WIND, 50 * E18);
     ctx(ALICE, T0 + 10, 0);
-    let token = c.create_lock(U128(50 * E18), WEEK);
+    let token = c.create_lock(U128(50 * E18), WEEK, None);
     ctx(ALICE, T0 + WEEK + 10, 0);
     assert_eq!(c.withdraw_lock(token).0, 50 * E18);
     assert_eq!(bal(&c, ALICE, WIND), 50 * E18);
@@ -385,16 +385,20 @@ fn wallet_only_evm_user_locks_and_votes_by_signature() {
     let lock_action = SignedAction::CreateLock {
         amount: U128(20 * E18),
         duration: 4 * WEEK,
+        permanent: false,
     };
     ctx(BOB, T0 + 20, 0);
     let sig = signed_by(&key, &lock_action, 1, T0 + 20 + EXPIRES_OFFSET);
-    let token = match c.execute(
-        wallet.clone(),
-        lock_action,
-        1,
-        T0 + 20 + EXPIRES_OFFSET,
-        sig,
-    ) {
+    let token = match c
+        .execute(
+            wallet.clone(),
+            lock_action,
+            1,
+            T0 + 20 + EXPIRES_OFFSET,
+            sig,
+        )
+        .value()
+    {
         ActionResult::TokenId(t) => t,
         _ => panic!("expected a token id"),
     };
@@ -409,7 +413,7 @@ fn wallet_only_evm_user_locks_and_votes_by_signature() {
     ctx(BOB, T0 + 2 * HOUR, 0);
     let expires = T0 + 2 * HOUR + EXPIRES_OFFSET;
     let sig = signed_by(&key, &vote_action, 2, expires);
-    c.execute(wallet, vote_action, 2, expires, sig);
+    c.execute(wallet, vote_action, 2, expires, sig).detach();
     assert_eq!(c.get_votes(token).len(), 1);
 }
 
@@ -423,6 +427,227 @@ fn signed_by(
     let json = near_sdk::serde_json::to_string(action).unwrap();
     let msg = action_message(&acct(SELF), &evm_wallet(key), nonce, expires, &json);
     format!("0x{}", hex(&evm_sign(key, &msg)))
+}
+
+// ---- Owner views and indexes ----
+
+#[test]
+fn owner_views_follow_positions_stakes_balances_and_withdrawals() {
+    let mut c = setup();
+    ctx(OWNER, T0, 0);
+    c.create_gauge(0);
+    let alice = owner_hex_of(ALICE);
+    alice_locks_and_provides(&mut c);
+    ctx(ALICE, T0 + 30, 0);
+    c.mint_position(0, -600, 600, U128(E18 / 2));
+
+    // Two ranges, listed in the order they were minted, and paged.
+    let positions = c.get_positions_of_owner(alice.clone(), 0, 10);
+    let ranges: Vec<(i32, i32)> = positions
+        .iter()
+        .map(|p| (p.tick_lower, p.tick_upper))
+        .collect();
+    assert_eq!(ranges, vec![(-300, 300), (-600, 600)]);
+    assert_eq!(
+        c.get_positions_of_owner(alice.clone(), 1, 1)[0].tick_lower,
+        -600
+    );
+    assert_eq!(c.get_positions_of_owner(alice.clone(), 0, 1).len(), 1);
+    assert!(c.get_positions_of_owner(alice.clone(), 5, 10).is_empty());
+    let single = c.get_position_of_owner(alice.clone(), 0, -300, 300);
+    assert_eq!(single.liquidity.0, E18);
+    assert_eq!(
+        single.liquidity.0,
+        c.get_position(0, acct(ALICE), -300, 300).liquidity.0
+    );
+
+    // Staking moves the liquidity to the NFT: the range stays listed, marked staked.
+    ctx(ALICE, T0 + 40, 0);
+    c.stake_position(0, -300, 300);
+    let staked = c
+        .get_positions_of_owner(alice.clone(), 0, 10)
+        .into_iter()
+        .find(|p| p.tick_lower == -300)
+        .expect("still listed");
+    assert!(staked.staked);
+    assert_eq!(staked.liquidity.0, E18, "the NFT's liquidity");
+    let stakes = c.get_stakes_of_owner(alice.clone(), 0, 10);
+    assert_eq!(stakes.len(), 1);
+    assert_eq!(
+        (
+            stakes[0].pool_id,
+            stakes[0].tick_lower,
+            stakes[0].tick_upper
+        ),
+        (0, -300, 300)
+    );
+    assert_eq!(stakes[0].liquidity.0, E18);
+
+    // Unstaking returns the liquidity to the owner's range and drops the stake.
+    ctx(ALICE, T0 + 50, 0);
+    c.unstake_position(0, -300, 300);
+    assert!(c.get_stakes_of_owner(alice.clone(), 0, 10).is_empty());
+    let back = c
+        .get_positions_of_owner(alice.clone(), 0, 10)
+        .into_iter()
+        .find(|p| p.tick_lower == -300)
+        .expect("listed");
+    assert!(!back.staked);
+    assert_eq!(back.liquidity.0, E18);
+
+    // A range that is burned and collected is no longer listed.
+    ctx(ALICE, T0 + 60, 0);
+    c.burn_position(0, -600, 600, U128(E18 / 2));
+    c.collect(0, -600, 600);
+    let left = c.get_positions_of_owner(alice.clone(), 0, 10);
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].tick_lower, -300);
+
+    // Balances: every nonzero token, with the same amounts as `get_balance`.
+    let balances = c.get_balances_of_owner(alice.clone());
+    for token in [USDC, WNEAR, WIND] {
+        let listed = balances
+            .iter()
+            .find(|(t, _)| t == token)
+            .map(|(_, a)| a.0)
+            .unwrap_or(0);
+        assert_eq!(listed, bal(&c, ALICE, token), "{token}");
+    }
+    assert!(balances.iter().all(|(_, a)| a.0 > 0));
+
+    // Withdrawals of the owner, paged, in creation order.
+    ctx(OWNER, T0, 0);
+    c.register_evm_asset(
+        84532,
+        "native".into(),
+        "base-sepolia:eth".into(),
+        18,
+        U128(E18),
+        U128(E18),
+    );
+    fund(&mut c, ALICE, "base-sepolia:eth", 10);
+    ctx(ALICE, T0 + 70, 0);
+    let to = "0x2222222222222222222222222222222222222222".to_string();
+    c.withdraw_evm("base-sepolia:eth".into(), U128(3), to.clone());
+    c.withdraw_evm("base-sepolia:eth".into(), U128(4), to);
+    let all = c.get_withdrawals_of_owner(alice.clone(), 0, 10);
+    assert_eq!(all.iter().map(|w| w.id).collect::<Vec<_>>(), vec![0, 1]);
+    assert_eq!(c.get_withdrawals_of_owner(alice.clone(), 1, 10)[0].id, 1);
+    assert_eq!(c.get_withdrawals_of_owner(alice, 0, 1).len(), 1);
+    assert!(c
+        .get_withdrawals_of_owner(owner_hex_of(BOB), 0, 10)
+        .is_empty());
+
+    // Gauges and bribe tokens.
+    let gauges = c.get_gauges();
+    assert_eq!(gauges.len(), 1);
+    assert_eq!(gauges[0].pool_id, 0);
+    assert_eq!(c.get_bribe_tokens(), vec![USDC.to_string()]);
+    ctx(OWNER, T0 + 80, 0);
+    c.whitelist_bribe_token(USDC.into(), false);
+    assert!(c.get_bribe_tokens().is_empty());
+}
+
+#[test]
+fn a_wind_deposit_for_a_wallet_is_listed_under_the_wallet_owner() {
+    let mut c = setup();
+    let key = sk(65);
+    let wallet = evm_wallet(&key).to_string();
+    let owner = c.resolve_wallet(wallet.clone());
+    ctx(WIND, T0 + 10, 0);
+    let result = c.ft_on_transfer(
+        acct(BOB),
+        U128(3 * E18),
+        format!("{{\"owner\":\"{wallet}\"}}"),
+    );
+    assert!(matches!(result, near_sdk::PromiseOrValue::Value(U128(0))));
+    assert_eq!(bal(&c, BOB, WIND), 0, "the sender gets nothing");
+    assert_eq!(
+        c.get_balances_of_owner(owner),
+        vec![(WIND.to_string(), U128(3 * E18))]
+    );
+}
+
+#[test]
+fn signed_distribute_runs_the_epoch_flip_through_execute() {
+    let mut c = setup();
+    ctx(OWNER, T0, 0);
+    c.create_gauge(0);
+    let key = sk(64);
+    let wallet = evm_wallet(&key).to_string();
+    let secs = T0 + WEEK + 2 * HOUR;
+    let action = SignedAction::Distribute;
+    ctx(BOB, secs, 0);
+    let sig = signed_by(&key, &action, 1, secs + EXPIRES_OFFSET);
+    let result = c.execute(wallet.clone(), action, 1, secs + EXPIRES_OFFSET, sig);
+    // A new epoch needs a mint, so `execute` hands back the promise.
+    assert!(matches!(result, near_sdk::PromiseOrValue::Promise(_)));
+    let amount = c
+        .pending_epoch
+        .as_ref()
+        .map(|p| to_u128(p.emission.mint_required))
+        .expect("a mint is pending");
+    assert!(amount > 0);
+    ctx(SELF, secs, 0);
+    c.on_distribute_minted(U128(amount), Ok(()));
+    assert_eq!(c.get_epoch().wind_minted.0, GENESIS + amount);
+
+    // The same epoch again is a no-op returning 0, through the signed path too.
+    let again = SignedAction::Distribute;
+    ctx(BOB, secs + HOUR, 0);
+    let sig = signed_by(&key, &again, 2, secs + HOUR + EXPIRES_OFFSET);
+    match c
+        .execute(wallet, again, 2, secs + HOUR + EXPIRES_OFFSET, sig)
+        .value()
+    {
+        ActionResult::Amount(U128(0)) => {}
+        _ => panic!("expected Amount(0)"),
+    }
+}
+
+#[test]
+fn signed_create_lock_can_be_permanent_and_old_messages_are_unchanged() {
+    let mut c = setup();
+    let key = sk(63);
+    let wallet = evm_wallet(&key).to_string();
+    let owner = c.resolve_wallet(wallet.clone());
+    ctx(WIND, T0 + 10, 0);
+    let _ = c.ft_on_transfer(
+        acct(BOB),
+        U128(20 * E18),
+        format!("{{\"owner\":\"{wallet}\"}}"),
+    );
+    let action = SignedAction::CreateLock {
+        amount: U128(20 * E18),
+        duration: 4 * WEEK,
+        permanent: true,
+    };
+    ctx(BOB, T0 + 20, 0);
+    let expires = T0 + 20 + EXPIRES_OFFSET;
+    let sig = signed_by(&key, &action, 1, expires);
+    let token = match c.execute(wallet, action, 1, expires, sig).value() {
+        ActionResult::TokenId(t) => t,
+        _ => panic!("expected a token id"),
+    };
+    let lock = c.get_lock(token).expect("lock");
+    assert!(lock.permanent);
+    assert_eq!(lock.amount.0, 20 * E18);
+    assert_eq!(c.get_locks_of(owner.clone()), vec![token]);
+    assert!(
+        c.get_balances_of_owner(owner).is_empty(),
+        "the WIND went into the lock"
+    );
+
+    // Without `permanent` the JSON is the one older clients sign.
+    let plain = SignedAction::CreateLock {
+        amount: U128(5),
+        duration: 7,
+        permanent: false,
+    };
+    assert_eq!(
+        near_sdk::serde_json::to_string(&plain).unwrap(),
+        "{\"CreateLock\":{\"amount\":\"5\",\"duration\":7}}"
+    );
 }
 
 /// Two stakers in one range, with trades both ways in between. Each unstakes and gets back its own
