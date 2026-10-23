@@ -101,6 +101,12 @@ pub enum MathError {
     InvalidReward,
     /// `BribeVotingReward.notifyRewardAmount`: a new reward token is not whitelisted (`NotWhitelisted`).
     NotWhitelisted,
+    /// `RewardsDistributor`: caller is not the minter (`NotMinter`).
+    NotMinter,
+    /// `RewardsDistributor.claim`: the minter's active period is behind the current week (`UpdatePeriod`).
+    UpdatePeriod,
+    /// `RewardsDistributor`: a payout to an owner of address zero (OZ `ERC20: transfer to the zero address`).
+    TransferToZeroAddress,
 }
 
 impl fmt::Display for MathError {
