@@ -25,8 +25,11 @@ docs/plan.md     Architecture, decisions and roadmap
 Phase 0 — engine port:
 
 - [x] Concentrated-liquidity math: `FullMath`, `UnsafeMath`, `BitMath`, `LiquidityMath`, `TickMath`, `SqrtPriceMath`, `SwapMath`
-- [ ] Ticks, tick bitmap, positions, oracle
-- [ ] CL pool (swap, mint, burn, collect) + fee modules
+- [x] Ticks (with staked liquidity + reward growth), tick bitmap, positions (staked), oracle
+- [x] Fee config: tick-spacing fees, custom swap/unstaked fees, whitelist
+- [x] CL pool: initialize, mint, burn, collect, swap, stake, reward growth, gauge fees
+- [ ] CL pool differential test against the real `CLPool.sol`
+- [ ] NEAR contract (testnet)
 - [ ] Router + quoter
 
 ## Correctness: differential testing
