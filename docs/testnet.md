@@ -259,3 +259,18 @@ Wasm 1.35 MB, SHA-256 `0440420b8ab8da78a937e5add4d4f84bc9bbabfb1766511807708d8bb
 
 Pending: `seed_pool_reserves` (pool-held amounts must be computed off-chain from pool state), so per-token
 `pool_reserves` read 0 and `migrated: true` until seeded.
+
+### v7 seeding + solvency (2026-10-23)
+
+`tools/seed-reserves` (read-only) computed pool holdings from pool state (tick math cross-checked against every pool's
+slot0 and liquidity) and the missing pre-v7 balance (the voter's 5 tUSDC bribe). Seeded with `seed_accounting` (1 new key)
+and `seed_pool_reserves` (10 pool/token entries). On-chain `check_solvency` afterwards:
+
+| Token | held (token contract) | owed (balances + pools + locked) | solvent |
+|---|---|---|---|
+| tUSDC | 110.000000000000000001 | 110.000000000000000001 | ✅ |
+| tWETH | 120.000000000000000001 | 120.000000000000000001 | ✅ |
+| WIND | 1,000,000 | 1,000,000 | ✅ |
+
+EVM assets are checked off-chain against the Base vault: test1 matches to 1 wei; the vault holds ~0.07 ETH more than
+owed (the initial 0.1 ETH funding of the vault was never credited to anyone), so it is solvent.
