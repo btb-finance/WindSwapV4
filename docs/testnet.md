@@ -181,3 +181,38 @@ Test user: a fresh EVM wallet `0x0d53794e20e0e4f96e07bcd8487ce557c6d9a4ac` (no N
 
 Bug found and fixed during this run: multi-hop paths typed `token_in` as a NEAR AccountId, so internal ids like
 `base-sepolia:eth` were rejected (commit 9ca8033, regression test added).
+
+## Base test token + ETH/USDC pool (2026-10-23)
+
+Test ERC-20 `Usdctest` (name `usdctest`, symbol `test1`, 18 decimals), source `tools/base-test-token/src/Usdctest.sol`
+(OpenZeppelin 5.6.1, owner-only `mint`). Deployed by the test wallet `0x0d53…a4ac`, which owns it.
+Token address: [0x2d330FEe66912f3eB54086357c2eAB46b998bd4f](https://sepolia.basescan.org/address/0x2d330FEe66912f3eB54086357c2eAB46b998bd4f).
+Internal token id `base-sepolia:test1`; the NEAR pool is `base-sepolia:eth` / `base-sepolia:test1`, pool 4, tick spacing 4, price 3000 test1 per ETH.
+
+Base Sepolia transactions:
+
+| Step | Tx | Result |
+|---|---|---|
+| deploy `Usdctest(0x0d53…a4ac)` | [0x0407…4653](https://sepolia.basescan.org/tx/0x0407524cc66a5bb13ea186b71fa2ac8de4f936aef9c2c867441b86e40ee14653) | contract at `0x2d33…bd4f` |
+| `mint(0x0d53…a4ac, 100000e18)` | [0x1cd5…02da](https://sepolia.basescan.org/tx/0x1cd5d139a4d86032437434e1a555df09c7752c763d145b87e9df0315f66c02da) | totalSupply 100000e18, wallet balance 100000e18 |
+| `transfer(vault, 9000e18)` | [0xaf5e…2bac](https://sepolia.basescan.org/tx/0xaf5e4613de5d7544c1d231855f0a24e61ea5a69436e64ee3ae3f025e8162bbac) | Transfer log index 57, reported as ERC-20 deposit |
+| native 0.003 ETH to vault | [0x8345…8611](https://sepolia.basescan.org/tx/0x83450dfaedda78c739c8b3738314a252e4925bbef5d1bcaace68df78e4d38611) | reported as native deposit, log index 0 |
+
+NEAR calls (contract `windswapv4-btb.testnet`; relayer calls signed by `windswapv4-relayer.testnet`):
+
+| Step | Tx | Result |
+|---|---|---|
+| `register_evm_asset(84532, 0x2d33…bd4f, "base-sepolia:test1", 18, cap 100000e18, daily 100000e18)` | `6HVwEafzD2fSLNgrCVyk6oH9jv1WgktDwRHDR4PeFnvj` | `get_evm_assets` lists it |
+| `report_evm_deposit` ERC-20 (log 57, 9000e18) | `FvuRMoYjcbGoCYAoX5pWep6g5zZ3mXPd7RyyUKYysfab` | `true` |
+| `report_evm_deposit` native (log 0, 0.003 ETH) | `8EdUfBAQ9ccKECBgnRXyXWnFcCbkSWUW1uxU8ZePFmis` | `true` |
+| owner balances after deposits | `resolve_wallet("evm:0x0d53…")` = `7d0cc58c…378e8f` | test1 9000e18, ETH 0.003e18 |
+| `create_pool(base-sepolia:eth, base-sepolia:test1, 4, isqrt(3000·2^192))` | `9VF8LMPq9Qms3zLv53DsHefZ1jcprCr1QEJtd5HAvVC9` | pool id 4, tick 80067 |
+| signed `MintPosition` pool 4, ticks 76000..84000, L = 767178844087728835 (nonce 101) via `execute` | `GHjybdjqqunjyK27CffDYcqiBrJMH64GLJ6fB7WSrzx2` | paid 0.0025 ETH + 7.732827575 test1 |
+| signed `SwapExactInput` 0.0001 ETH → test1, min out 0.2 (nonce 102) via `execute` | `HHAHYDMdh5zopvTuyMLA3JFiGJvFqYVgsFx6Y1nABJoJ` | received 0.297725470343984462 test1 |
+
+Final state: owner balances 8992.564897895165752477 test1 and 0.0004 ETH on NEAR (the rest is in the pool).
+Pool 4: liquidity 767178844087728835, tick 79925 after the swap, sqrt price `4308758448352094782088345339054`.
+The EVM wallet still holds 91000 test1 on Base and about 0.006993 ETH.
+
+Signed messages use the format above with `{"MintPosition":{…}}` / `{"SwapExactInput":{…}}`. Liquidity was sized from the sqrt-price math
+so that the ETH side was 0.0025 ETH (cap 0.0028) and the test1 side 7.73 (cap 8900).
