@@ -8,6 +8,7 @@
 //! differential test vectors generated from the original Solidity libraries.
 
 pub mod error;
+pub mod fees;
 pub mod math;
 pub mod pool;
 
