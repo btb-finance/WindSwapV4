@@ -101,6 +101,50 @@ pub enum MathError {
     InvalidReward,
     /// `BribeVotingReward.notifyRewardAmount`: a new reward token is not whitelisted (`NotWhitelisted`).
     NotWhitelisted,
+    /// `Voter`: the token already voted or deposited in this epoch (`AlreadyVotedOrDeposited`).
+    AlreadyVotedOrDeposited,
+    /// `Voter`: inside the first hour of the epoch, when distribution happens (`DistributeWindow`).
+    DistributeWindow,
+    /// `Voter.vote`: pool and weight arrays have different lengths (`UnequalLengths`).
+    UnequalLengths,
+    /// `Voter.vote`: more pools than `maxVotingNum` (`TooManyPools`).
+    TooManyPools,
+    /// `Voter.vote`: after the vote window and the token is not whitelisted (`NotWhitelistedNFT`).
+    NotWhitelistedNft,
+    /// `Voter`: caller is not the governor (`NotGovernor`).
+    NotGovernor,
+    /// `Voter`: caller is not the emergency council (`NotEmergencyCouncil`).
+    NotEmergencyCouncil,
+    /// `Voter`: caller is not the minter (`NotMinter`).
+    NotMinter,
+    /// `Voter.setMaxVotingNum`: below the minimum of 10 (`MaximumVotingNumberTooLow`).
+    MaximumVotingNumberTooLow,
+    /// `Voter.setMaxVotingNum`: the value is already set (`SameValue`).
+    SameValue,
+    /// `Voter._vote`: the pool has no gauge (`GaugeDoesNotExist`).
+    GaugeDoesNotExist,
+    /// `Voter._vote`: the gauge is killed (`GaugeNotAlive`).
+    GaugeNotAlive,
+    /// `Voter._vote`: the pool already has a vote from this token (`NonZeroVotes`).
+    NonZeroVotes,
+    /// `Voter._vote`: the pool's vote weight rounds to zero (`ZeroBalance`).
+    ZeroBalance,
+    /// `Voter.createGauge`: the pool factory is not approved in the registry (`FactoryPathNotApproved`).
+    FactoryPathNotApproved,
+    /// `Voter.createGauge`: the pool already has a gauge (`GaugeExists`).
+    GaugeExists,
+    /// `Voter.createGauge`: a non-governor used an address that is not a pool (`NotAPool`).
+    NotAPool,
+    /// `Voter.createGauge`: a non-governor used a pool with a token that is not whitelisted (`NotWhitelistedToken`).
+    NotWhitelistedToken,
+    /// `Voter.killGauge`: the gauge is already killed (`GaugeAlreadyKilled`).
+    GaugeAlreadyKilled,
+    /// `Voter.reviveGauge`: the gauge is already alive (`GaugeAlreadyRevived`).
+    GaugeAlreadyRevived,
+    /// `Voter.distribute` / `updateFor`: pool index past the end of `pools` (`Panic(0x32)`).
+    IndexOutOfBounds,
+    /// `Voter.setEmergencyCouncil`: the zero address (`ZeroAddress`).
+    ZeroAddress,
 }
 
 impl fmt::Display for MathError {

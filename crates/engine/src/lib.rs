@@ -16,6 +16,7 @@ pub mod pool;
 pub mod rewards;
 pub mod router;
 pub mod ve;
+pub mod voter;
 
 pub use alloy_primitives::{I256, U256};
 pub use error::MathError;
