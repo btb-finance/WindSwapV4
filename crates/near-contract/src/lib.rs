@@ -771,5 +771,8 @@ impl Contract {
     }
 }
 
+pub mod accounts;
+#[cfg(test)]
+mod accounts_tests;
 #[cfg(test)]
 mod tests;

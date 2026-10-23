@@ -19,9 +19,13 @@ default = ["testnet-faucet"]
 testnet-faucet = []
 
 [dependencies]
-near-sdk = { workspace = true }
+# `env::ecrecover` (EVM wallet linking) is behind near-sdk's `unstable` feature.
+near-sdk = { workspace = true, features = ["unstable"] }
 windswap-engine = { path = "../engine", features = ["borsh"] }
+bs58 = "0.5"
 
 [dev-dependencies]
 # Host builds of near-sdk need `unit-testing`; it is only enabled for `cargo test`.
 near-sdk = { workspace = true, features = ["unit-testing"] }
+k256 = { version = "0.13", features = ["ecdsa"] }
+ed25519-dalek = "2"
