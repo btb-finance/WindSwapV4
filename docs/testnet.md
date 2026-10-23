@@ -274,3 +274,21 @@ and `seed_pool_reserves` (10 pool/token entries). On-chain `check_solvency` afte
 
 EVM assets are checked off-chain against the Base vault: test1 matches to 1 wei; the vault holds ~0.07 ETH more than
 owed (the initial 0.1 ETH funding of the vault was never credited to anyone), so it is solvent.
+
+## v8: one-step flows live (2026-10-23)
+
+Upgraded with `migrate` (v7 → intents). Wasm 1.45 MB, SHA-256 `01d54b9f434cca4a778e1940c67cd28d0614a88cf795662a19f4810e076282c4`.
+
+**One-click swap, NEAR wallet** — one `ft_transfer_call` on tUSDC with
+`msg = {"swap":{"path":[{"pool_id":1,"token_in":"windswapv4-tusdc.testnet"}],"min_amount_out":"1","to":"near:windswapv4-user.testnet"}}`:
+wallet −1 tUSDC, **+0.9679 tWETH** in the same transaction. With an impossible `min_amount_out` the contract used 0 and the
+token contract refunded — wallet unchanged.
+
+**One-click from Base, EVM wallet (intent)** — fresh wallet `0x0d53…a4ac`:
+1. signs intent `{"Swap":{"token_in":"base-sepolia:eth","amount_in":"1000000000000000","path":[{"pool_id":4,…}],"min_amount_out":"1000000000000000000","to":"evm:0x0d53…a4ac"}}` → `submit_intent` (relayed) → intent #0;
+2. sends 0.001 ETH on Base to the vault: [0x013c…07d9](https://sepolia.basescan.org/tx/0x013c4817a2a7b26c13588f9a6f80907bcb7156008edf842eee55d9b9880307d9);
+3. relayer `once`: `report_evm_deposit` → the contract executes the intent in the same call (swap 0.001 ETH → 2.7606 test1) and records withdrawal #3 → `process_withdrawal` → MPC-signed ERC-20 transfer (nonce 4) → broadcast [0xa410…0ebd](https://sepolia.basescan.org/tx/0xa410a1569a31f1368cad9ef81bf0adcf076b3e7289b561ab140e4764b9b40ebd);
+4. wallet's test1 on Base: 91,000 → **91,002.7606**. First ERC-20 payout signed by the contract.
+
+Ops note: the public `rpc.testnet.near.org` returned HTTP 429 to the relayer; switched its config to
+`https://rpc.testnet.fastnear.com`. The frontend should do the same (with fallbacks) — same cause as "Failed to fetch".

@@ -1,6 +1,6 @@
 {
   "near": {
-    "rpcUrl": "https://rpc.testnet.near.org",
+    "rpcUrl": "https://rpc.testnet.fastnear.com",
     "contractId": "windswapv4-btb.testnet",
     "relayerAccountId": "windswapv4-relayer.testnet",
     "credentialsPath": "~/.near-credentials/testnet/windswapv4-relayer.testnet.json",
