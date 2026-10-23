@@ -25,3 +25,9 @@ windswap-engine = { path = "../engine", features = ["borsh"] }
 [dev-dependencies]
 # Host builds of near-sdk need `unit-testing`; it is only enabled for `cargo test`.
 near-sdk = { workspace = true, features = ["unit-testing"] }
+# Test-only oracles for the EVM transaction code: an independent EIP-1559 encoder, and a
+# secp256k1 signer and recoverer. Neither is linked into the wasm.
+alloy-consensus = { version = "0.9", features = ["k256"] }
+alloy-eips = "0.9"
+alloy-primitives = { workspace = true, features = ["std"] }
+k256 = { version = "0.13", features = ["ecdsa", "arithmetic"] }

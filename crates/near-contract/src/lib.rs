@@ -28,7 +28,10 @@
 //!   unstaked fee is stored but does not change any swap output yet.
 //! - Multi-hop routes (`swap_exact_input`, `swap_exact_output`, quotes) run on working copies
 //!   of the touched pools. Only a successful swap writes them back.
-//! - No Chain Signatures: the engine's `[u8; 32]` account id is `sha256(account_id)`.
+//! - Chain Signatures: `request_evm_payout` has the MPC network sign an EIP-1559 transfer and
+//!   returns the signed raw transaction. See `evm.rs` and docs/chain-signatures.md.
+
+mod evm;
 
 use std::collections::BTreeMap;
 
@@ -36,7 +39,7 @@ use near_sdk::json_types::U128;
 use near_sdk::store::{IterableMap, IterableSet, LookupMap};
 use near_sdk::{
     assert_one_yocto, env, ext_contract, near, AccountId, BorshStorageKey, Gas, NearToken,
-    PanicOnDefault, Promise, PromiseOrValue,
+    PanicOnDefault, Promise, PromiseError, PromiseOrValue,
 };
 use windswap_engine::error::Result as EngineResult;
 use windswap_engine::fees::FeeConfig;
@@ -68,19 +71,35 @@ pub struct Contract {
     balances: LookupMap<(AccountId, String), u128>,
     /// Tokens accepted by `ft_on_transfer`. Managed by the owner.
     allowed_tokens: IterableSet<AccountId>,
+    /// The Chain Signatures MPC contract that `request_evm_payout` calls. Owner-settable.
+    mpc_contract: AccountId,
 }
 
-/// State layout of the deployed testnet contract, before `allowed_tokens` was added.
-/// Only used by `migrate`. Field order and types must match the old deployment exactly.
+/// State layout of the deployed testnet contract (v1 and v2 share it): everything up to and
+/// including `allowed_tokens`. Only used by `migrate`. Field order and types must match the
+/// deployed state exactly.
 #[near(serializers = [borsh])]
-struct ContractV0 {
+struct ContractV1 {
     owner: AccountId,
     fee_config: FeeConfig,
     pools: IterableMap<u64, ClPool>,
     pool_tokens: LookupMap<u64, (String, String)>,
     next_pool_id: u64,
     balances: LookupMap<(AccountId, String), u128>,
+    allowed_tokens: IterableSet<AccountId>,
 }
+
+/// The default MPC contract on NEAR testnet. `set_mpc_contract` changes it.
+const DEFAULT_MPC_CONTRACT: &str = "v1.signer-prod.testnet";
+
+/// Gas for the `sign` call. The probe measured about 8.6 Tgas burnt over the whole receipt tree
+/// for one signature, so this leaves room on the MPC side.
+const SIGN_CALL_GAS_TGAS: u64 = 50;
+/// Gas for `on_evm_signed`. It only parses the response and builds the transaction.
+const CALLBACK_GAS_TGAS: u64 = 20;
+/// `request_evm_payout` needs at least this much prepaid gas, so the sign call and the
+/// callback both get their share.
+const PAYOUT_MIN_PREPAID_GAS_TGAS: u64 = 100;
 
 #[near(serializers = [json])]
 pub struct Slot0View {
@@ -142,11 +161,84 @@ trait FungibleTokenCore {
     fn ft_transfer(&mut self, receiver_id: AccountId, amount: U128, memo: Option<String>);
 }
 
+/// The Chain Signatures MPC contract. `sign` yields until the MPC nodes answer.
+#[allow(dead_code)]
+#[ext_contract(ext_mpc)]
+trait ChainSignatures {
+    fn sign(&mut self, request: SignRequest) -> MpcSignature;
+}
+
 /// This contract's own callbacks.
 #[allow(dead_code)]
 #[ext_contract(ext_self)]
 trait SelfCallbacks {
     fn on_withdraw(&mut self, account: AccountId, token: AccountId, amount: U128);
+    fn on_evm_signed(&mut self, tx: EvmTx);
+}
+
+/// The `request` argument of the MPC `sign` call. Only secp256k1 (`domain_id` 0) is used here.
+#[near(serializers = [json])]
+pub struct SignRequest {
+    pub path: String,
+    pub payload_v2: Payload,
+    pub domain_id: u64,
+}
+
+/// A 32-byte digest, hex without a prefix. `Ecdsa` is the only variant used here.
+#[near(serializers = [json])]
+pub enum Payload {
+    Ecdsa(String),
+    Eddsa(String),
+}
+
+/// The MPC response: `big_r` is a compressed point, `s` a scalar, both as hex.
+#[near(serializers = [json])]
+pub struct MpcSignature {
+    pub big_r: AffinePoint,
+    pub s: ScalarValue,
+    pub recovery_id: u8,
+    pub scheme: String,
+}
+
+#[near(serializers = [json])]
+pub struct AffinePoint {
+    pub affine_point: String,
+}
+
+#[near(serializers = [json])]
+pub struct ScalarValue {
+    pub scalar: String,
+}
+
+/// An EIP-1559 transfer as passed to `request_evm_payout`. It is also the argument of the
+/// callback, so the callback can build the signed transaction from the same fields.
+#[derive(Clone)]
+#[near(serializers = [json])]
+pub struct EvmTx {
+    pub chain_id: u64,
+    pub nonce: u64,
+    /// The recipient, a 0x-prefixed 20-byte address.
+    pub to: String,
+    pub value_wei: U128,
+    pub max_fee_per_gas: U128,
+    pub max_priority_fee_per_gas: U128,
+    pub gas_limit: u64,
+}
+
+impl EvmTx {
+    fn transfer(&self) -> Result<evm::Eip1559Transfer, String> {
+        let transfer = evm::Eip1559Transfer {
+            chain_id: self.chain_id,
+            nonce: self.nonce,
+            max_priority_fee_per_gas: self.max_priority_fee_per_gas.0,
+            max_fee_per_gas: self.max_fee_per_gas.0,
+            gas_limit: self.gas_limit,
+            to: evm::parse_address(&self.to)?,
+            value: self.value_wei.0,
+        };
+        transfer.validate()?;
+        Ok(transfer)
+    }
 }
 
 /// Maps a NEAR account to the engine's 32-byte account id.
@@ -178,6 +270,12 @@ fn parse_u256(s: &str) -> U256 {
 fn parse_i256(s: &str) -> I256 {
     s.parse::<I256>()
         .unwrap_or_else(|_| env::panic_str(&format!("invalid I256: {s}")))
+}
+
+fn default_mpc_contract() -> AccountId {
+    DEFAULT_MPC_CONTRACT
+        .parse()
+        .unwrap_or_else(|_| env::panic_str("invalid default MPC contract id"))
 }
 
 /// A token id must parse as a NEAR account id, since it is the token contract's account.
@@ -363,17 +461,19 @@ impl Contract {
             next_pool_id: 0,
             balances: LookupMap::new(StorageKey::Balances),
             allowed_tokens: IterableSet::new(StorageKey::AllowedTokens),
+            mpc_contract: default_mpc_contract(),
         }
     }
 
-    /// Upgrade path from the v0 testnet state (no `allowed_tokens`). Run once right after
-    /// deploying this code over the old contract. The new `allowed_tokens` set starts empty,
-    /// so the owner must `add_token` again before deposits work. Only the contract account
-    /// can call it (`#[private]`).
+    /// Upgrade from the deployed testnet state (the layout of `ContractV1`) to the current
+    /// one. Run once, as the init call of the redeploy:
+    /// `near contract deploy <acct> use-file <wasm> with-init-call migrate json-args '{}'`.
+    /// Existing state is kept, and `mpc_contract` starts at the testnet default. Only the
+    /// contract account can call it (`#[private]`).
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
-        let old: ContractV0 =
+        let old: ContractV1 =
             env::state_read().unwrap_or_else(|| env::panic_str("no contract state to migrate"));
         Self {
             owner: old.owner,
@@ -382,8 +482,109 @@ impl Contract {
             pool_tokens: old.pool_tokens,
             next_pool_id: old.next_pool_id,
             balances: old.balances,
-            allowed_tokens: IterableSet::new(StorageKey::AllowedTokens),
+            allowed_tokens: old.allowed_tokens,
+            mpc_contract: default_mpc_contract(),
         }
+    }
+
+    /// Owner only. Sets the Chain Signatures MPC contract used by `request_evm_payout`.
+    pub fn set_mpc_contract(&mut self, mpc_contract: AccountId) {
+        self.assert_owner();
+        self.mpc_contract = mpc_contract;
+    }
+
+    /// The Chain Signatures MPC contract used by `request_evm_payout`.
+    pub fn get_mpc_contract(&self) -> AccountId {
+        self.mpc_contract.clone()
+    }
+
+    /// Owner only. Asks the MPC network to sign an EIP-1559 transfer from this contract's
+    /// derived EVM address (path `path`, secp256k1, domain 0), and returns the signed raw
+    /// transaction `0x02 || rlp(...)` as a 0x-hex string.
+    ///
+    /// The caller must attach exactly 1 yoctoNEAR, as for `withdraw`. The `sign` call attaches
+    /// 1 yoctoNEAR from the contract's own balance, which the MPC contract requires. The caller
+    /// must attach at least 100 Tgas, of which 50 go to `sign` and 20 to the callback.
+    ///
+    /// The signing key is derived from `(path, predecessor = this contract)`. The EVM address
+    /// is `keccak256(pubkey)[12..]` of `derived_public_key` on the MPC contract. Nothing in this
+    /// contract checks that the address holds funds or that `nonce` is the next one.
+    // The eight arguments are the request fields of the spec, so they stay separate.
+    #[allow(clippy::too_many_arguments)]
+    #[payable]
+    pub fn request_evm_payout(
+        &mut self,
+        chain_id: u64,
+        nonce: u64,
+        to: String,
+        value_wei: U128,
+        max_fee_per_gas: U128,
+        max_priority_fee_per_gas: U128,
+        gas_limit: u64,
+        path: String,
+    ) -> Promise {
+        self.assert_owner();
+        assert_one_yocto();
+        if env::prepaid_gas() < Gas::from_tgas(PAYOUT_MIN_PREPAID_GAS_TGAS) {
+            env::panic_str(&format!(
+                "attach at least {PAYOUT_MIN_PREPAID_GAS_TGAS} Tgas of prepaid gas"
+            ));
+        }
+        if path.is_empty() {
+            env::panic_str("path must not be empty");
+        }
+        let tx = EvmTx {
+            chain_id,
+            nonce,
+            to,
+            value_wei,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            gas_limit,
+        };
+        let transfer = tx.transfer().unwrap_or_else(|e| env::panic_str(&e));
+        let digest = transfer.signing_hash();
+
+        let request = SignRequest {
+            path,
+            payload_v2: Payload::Ecdsa(evm::hex_plain(&digest)),
+            domain_id: 0,
+        };
+        ext_mpc::ext(self.mpc_contract.clone())
+            .with_attached_deposit(NearToken::from_yoctonear(1))
+            .with_static_gas(Gas::from_tgas(SIGN_CALL_GAS_TGAS))
+            .sign(request)
+            .then(
+                ext_self::ext(env::current_account_id())
+                    .with_static_gas(Gas::from_tgas(CALLBACK_GAS_TGAS))
+                    .on_evm_signed(tx),
+            )
+    }
+
+    /// Callback for `request_evm_payout`. Builds the signed raw transaction from the MPC
+    /// response and returns it as 0x-hex. Panics if the MPC call failed or the response is
+    /// not a valid secp256k1 signature.
+    #[private]
+    pub fn on_evm_signed(
+        &self,
+        tx: EvmTx,
+        #[callback_result] sig: Result<MpcSignature, PromiseError>,
+    ) -> String {
+        let sig = sig.unwrap_or_else(|e| env::panic_str(&format!("MPC sign failed: {e:?}")));
+        if sig.scheme != "Secp256k1" {
+            env::panic_str(&format!("unexpected MPC scheme: {}", sig.scheme));
+        }
+        let transfer = tx.transfer().unwrap_or_else(|e| env::panic_str(&e));
+        let big_r = evm::hex_decode(&sig.big_r.affine_point)
+            .unwrap_or_else(|e| env::panic_str(&format!("big_r: {e}")));
+        let r = evm::r_from_affine_point(&big_r).unwrap_or_else(|e| env::panic_str(&e));
+        let s = evm::hex_decode(&sig.s.scalar)
+            .ok()
+            .and_then(|b| <[u8; 32]>::try_from(b).ok())
+            .unwrap_or_else(|| env::panic_str("s must be 32 bytes of hex"));
+        let raw = evm::assemble_signed(&transfer, &r, &s, sig.recovery_id)
+            .unwrap_or_else(|e| env::panic_str(&e));
+        evm::hex_0x(&raw)
     }
 
     /// Owner only. Creates and initializes a pool for `(token0, token1)`. The tick spacing

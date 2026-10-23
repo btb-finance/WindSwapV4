@@ -464,22 +464,25 @@ fn withdraw_works_after_token_is_removed() {
     assert_eq!(balance(&c, ALICE, USDC), 0);
 }
 
-// ---- Upgrade from the v0 layout ----
+// ---- Upgrade from the deployed layout (ContractV1) ----
 
 #[test]
-fn migrate_reads_v0_state() {
+fn migrate_reads_deployed_state() {
     set_ctx(OWNER, 1_000);
     {
-        // Write a state in the old layout, using the same storage prefixes as v0.
+        // Write the deployed layout, with the same storage prefixes as the testnet contract.
         let mut balances = LookupMap::new(StorageKey::Balances);
         balances.insert((acct(ALICE), USDC.to_string()), 42u128);
-        let old = ContractV0 {
+        let mut allowed_tokens = IterableSet::new(StorageKey::AllowedTokens);
+        allowed_tokens.insert(acct(USDC));
+        let old = ContractV1 {
             owner: acct(OWNER),
             fee_config: FeeConfig::default(),
             pools: IterableMap::new(StorageKey::Pools),
             pool_tokens: LookupMap::new(StorageKey::PoolTokens),
             next_pool_id: 3,
             balances,
+            allowed_tokens,
         };
         env::state_write(&old);
     }
@@ -488,13 +491,334 @@ fn migrate_reads_v0_state() {
     assert_eq!(c.owner, acct(OWNER));
     assert_eq!(c.next_pool_id, 3);
     assert_eq!(balance(&c, ALICE, USDC), 42);
-    assert!(c.get_tokens().is_empty(), "whitelist starts empty");
+    assert_eq!(c.get_tokens(), vec![acct(USDC)], "whitelist is kept");
+    assert_eq!(c.get_mpc_contract(), acct("v1.signer-prod.testnet"));
 
-    // The migrated contract works: the owner can whitelist and deposits are credited.
-    c.add_token(acct(USDC));
+    // The migrated contract works: a whitelisted deposit is still credited.
     set_ctx(USDC, 1_000);
     let _ = c.ft_on_transfer(acct(ALICE), U128(8), String::new());
     assert_eq!(balance(&c, ALICE, USDC), 50);
+}
+
+#[test]
+#[should_panic(expected = "no contract state to migrate")]
+fn migrate_without_state_panics() {
+    set_ctx(OWNER, 1_000);
+    let _ = Contract::migrate();
+}
+
+// ---- Chain Signatures: config ----
+
+#[test]
+fn set_mpc_contract_is_owner_only() {
+    let mut c = setup();
+    assert_eq!(c.get_mpc_contract(), acct("v1.signer-prod.testnet"));
+    set_ctx(OWNER, 1_000);
+    c.set_mpc_contract(acct("mpc.example.testnet"));
+    assert_eq!(c.get_mpc_contract(), acct("mpc.example.testnet"));
+}
+
+#[test]
+#[should_panic(expected = "only owner")]
+fn set_mpc_contract_rejects_non_owner() {
+    let mut c = setup();
+    set_ctx(ALICE, 1_000);
+    c.set_mpc_contract(acct("mpc.example.testnet"));
+}
+
+// ---- Chain Signatures: request_evm_payout ----
+
+/// The contract account in tests. The callback is private to it.
+const SELF_ACCOUNT: &str = "windswapv4-btb.testnet";
+const PAYOUT_PATH: &str = "ethereum-1";
+const PAYOUT_TO: &str = "0x2222222222222222222222222222222222222222";
+
+/// A context for a call that makes a promise: given caller, deposit and prepaid gas.
+fn set_payout_ctx(predecessor: &str, deposit: u128, prepaid_tgas: u64) {
+    let mut builder = VMContextBuilder::new();
+    builder
+        .current_account_id(acct(SELF_ACCOUNT))
+        .predecessor_account_id(acct(predecessor))
+        .attached_deposit(NearToken::from_yoctonear(deposit))
+        .prepaid_gas(near_sdk::Gas::from_tgas(prepaid_tgas))
+        .block_timestamp(1_000 * 1_000_000_000);
+    testing_env!(
+        builder.build(),
+        near_sdk::test_vm_config(),
+        near_sdk::RuntimeFeesConfig::test(),
+        Default::default(),
+        vec![]
+    );
+}
+
+fn evm_tx() -> EvmTx {
+    EvmTx {
+        chain_id: 11_155_111,
+        nonce: 7,
+        to: PAYOUT_TO.to_string(),
+        value_wei: U128(1_000_000_000_000_000_000),
+        max_fee_per_gas: U128(30_000_000_000),
+        max_priority_fee_per_gas: U128(2_000_000_000),
+        gas_limit: 21_000,
+    }
+}
+
+/// Requests the payout of `evm_tx()` (1 ETH on Sepolia, nonce 7) from the owner.
+fn request_payout(c: &mut Contract) -> Promise {
+    c.request_evm_payout(
+        11_155_111,
+        7,
+        PAYOUT_TO.to_string(),
+        U128(1_000_000_000_000_000_000),
+        U128(30_000_000_000),
+        U128(2_000_000_000),
+        21_000,
+        PAYOUT_PATH.to_string(),
+    )
+}
+
+#[test]
+#[should_panic(expected = "only owner")]
+fn request_evm_payout_rejects_non_owner() {
+    let mut c = setup();
+    set_payout_ctx(ALICE, 1, 100);
+    let _ = request_payout(&mut c);
+}
+
+#[test]
+#[should_panic(expected = "Requires attached deposit of exactly 1 yoctoNEAR")]
+fn request_evm_payout_requires_one_yocto() {
+    let mut c = setup();
+    set_payout_ctx(OWNER, 0, 100);
+    let _ = request_payout(&mut c);
+}
+
+#[test]
+#[should_panic(expected = "Requires attached deposit of exactly 1 yoctoNEAR")]
+fn request_evm_payout_rejects_two_yocto() {
+    let mut c = setup();
+    set_payout_ctx(OWNER, 2, 100);
+    let _ = request_payout(&mut c);
+}
+
+#[test]
+#[should_panic(expected = "attach at least 100 Tgas")]
+fn request_evm_payout_requires_prepaid_gas() {
+    let mut c = setup();
+    set_payout_ctx(OWNER, 1, 99);
+    let _ = request_payout(&mut c);
+}
+
+#[test]
+#[should_panic(expected = "max_priority_fee_per_gas exceeds")]
+fn request_evm_payout_rejects_priority_above_max_fee() {
+    let mut c = setup();
+    set_payout_ctx(OWNER, 1, 100);
+    let _ = c.request_evm_payout(
+        11_155_111,
+        7,
+        PAYOUT_TO.to_string(),
+        U128(1),
+        U128(1_000),
+        U128(2_000),
+        21_000,
+        PAYOUT_PATH.to_string(),
+    );
+}
+
+#[test]
+#[should_panic(expected = "address must start with 0x")]
+fn request_evm_payout_rejects_bad_address() {
+    let mut c = setup();
+    set_payout_ctx(OWNER, 1, 100);
+    let _ = c.request_evm_payout(
+        11_155_111,
+        7,
+        "2222222222222222222222222222222222222222".to_string(),
+        U128(1),
+        U128(30_000_000_000),
+        U128(2_000_000_000),
+        21_000,
+        PAYOUT_PATH.to_string(),
+    );
+}
+
+#[test]
+#[should_panic(expected = "gas_limit must be at least 21000")]
+fn request_evm_payout_rejects_low_gas_limit() {
+    let mut c = setup();
+    set_payout_ctx(OWNER, 1, 100);
+    let _ = c.request_evm_payout(
+        11_155_111,
+        7,
+        PAYOUT_TO.to_string(),
+        U128(1),
+        U128(30_000_000_000),
+        U128(2_000_000_000),
+        20_999,
+        PAYOUT_PATH.to_string(),
+    );
+}
+
+/// The `sign` call carries the path, the transfer's signing hash, domain 0, 1 yocto and 50
+/// Tgas. The hash itself is checked against alloy in evm.rs.
+#[test]
+fn request_evm_payout_sends_sign_call_with_signing_hash() {
+    let mut c = setup();
+    set_payout_ctx(OWNER, 1, 100);
+    request_payout(&mut c).detach();
+
+    let (args, deposit, gas) = sign_call_args().expect("a sign call was created");
+    assert_eq!(deposit, NearToken::from_yoctonear(1));
+    assert_eq!(gas, near_sdk::Gas::from_tgas(50));
+
+    let json: near_sdk::serde_json::Value = near_sdk::serde_json::from_slice(&args).unwrap();
+    assert_eq!(json["request"]["path"], PAYOUT_PATH);
+    assert_eq!(json["request"]["domain_id"], 0);
+    let expected = evm::hex_plain(&evm_tx().transfer().unwrap().signing_hash());
+    assert_eq!(json["request"]["payload_v2"]["Ecdsa"], expected);
+}
+
+/// Arguments, deposit and static gas of the `sign` function call created by the last call.
+fn sign_call_args() -> Option<(Vec<u8>, NearToken, near_sdk::Gas)> {
+    use near_sdk::mock::MockAction;
+    near_sdk::test_utils::get_created_receipts()
+        .iter()
+        .flat_map(|r| r.actions.iter())
+        .find_map(|a| match a {
+            MockAction::FunctionCallWeight {
+                method_name,
+                args,
+                attached_deposit,
+                prepaid_gas,
+                ..
+            } if method_name == b"sign" => Some((args.clone(), *attached_deposit, *prepaid_gas)),
+            _ => None,
+        })
+}
+
+// ---- Chain Signatures: on_evm_signed ----
+
+/// A secp256k1 key for the tests, and its EVM address.
+struct TestKey {
+    sk: k256::ecdsa::SigningKey,
+    address: [u8; 20],
+}
+
+fn test_key() -> TestKey {
+    let sk = k256::ecdsa::SigningKey::from_bytes(&k256::FieldBytes::clone_from_slice(&[0x42; 32]))
+        .unwrap();
+    let enc = sk.verifying_key().to_encoded_point(false);
+    let hash = alloy_primitives::keccak256(&enc.as_bytes()[1..]);
+    TestKey {
+        sk,
+        address: hash[12..].try_into().unwrap(),
+    }
+}
+
+/// What the MPC returns for digest `hash` with nonce `k`: the compressed `big_r` (no prefix,
+/// as in the probe), `s`, and the recovery id. With `high_s` the value of `s` is negated and
+/// the parity flipped, which is the form that needs normalising.
+fn mpc_response(key: &TestKey, hash: &[u8; 32], k: u64, high_s: bool) -> MpcSignature {
+    use k256::elliptic_curve::point::AffineCoordinates;
+    use k256::elliptic_curve::sec1::ToEncodedPoint;
+    use k256::elliptic_curve::PrimeField;
+    use k256::{FieldBytes, ProjectivePoint, Scalar};
+
+    let secret: Scalar = *key.sk.as_nonzero_scalar().as_ref();
+    let nonce = Scalar::from(k);
+    let big_r = (ProjectivePoint::GENERATOR * nonce).to_affine();
+    let r = Option::<Scalar>::from(Scalar::from_repr(big_r.x())).unwrap();
+    let z = Option::<Scalar>::from(Scalar::from_repr(FieldBytes::clone_from_slice(hash))).unwrap();
+    let mut s = nonce.invert().unwrap() * (z + r * secret);
+    let mut parity = u8::from(bool::from(big_r.y_is_odd()));
+    if high_s {
+        s = -s;
+        parity ^= 1;
+    }
+    let point = big_r.to_encoded_point(true);
+    MpcSignature {
+        big_r: AffinePoint {
+            affine_point: evm::hex_plain(point.as_bytes()),
+        },
+        s: ScalarValue {
+            scalar: evm::hex_plain(&s.to_bytes()),
+        },
+        recovery_id: parity,
+        scheme: "Secp256k1".to_string(),
+    }
+}
+
+/// Runs a payout end to end in the host tests. The request builds the digest and sends it to
+/// the MPC; the test plays the MPC node; the callback returns the signed raw transaction. The
+/// raw transaction is decoded with alloy, and its recovered signer is checked.
+fn run_payout(high_s: bool) -> String {
+    use alloy_consensus::TxEnvelope;
+    use alloy_eips::eip2718::Decodable2718;
+
+    let key = test_key();
+    let mut c = setup();
+    set_payout_ctx(OWNER, 1, 100);
+    request_payout(&mut c).detach();
+
+    let (args, _, _) = sign_call_args().expect("a sign call was created");
+    let json: near_sdk::serde_json::Value = near_sdk::serde_json::from_slice(&args).unwrap();
+    let digest_hex = json["request"]["payload_v2"]["Ecdsa"].as_str().unwrap();
+    let digest: [u8; 32] = evm::hex_decode(digest_hex).unwrap().try_into().unwrap();
+
+    let sig = mpc_response(&key, &digest, 0x1234_5678_9abc_def0, high_s);
+    set_payout_ctx(SELF_ACCOUNT, 0, 100);
+    let raw = c.on_evm_signed(evm_tx(), Ok(sig));
+
+    let bytes = evm::hex_decode(&raw).unwrap();
+    let envelope = TxEnvelope::decode_2718(&mut bytes.as_slice()).expect("valid envelope");
+    assert_eq!(
+        envelope.recover_signer().unwrap(),
+        alloy_primitives::Address::from(key.address)
+    );
+    raw
+}
+
+#[test]
+fn on_evm_signed_returns_raw_tx_that_recovers_to_signer() {
+    let raw = run_payout(false);
+    assert!(raw.starts_with("0x02"), "type-2 transaction");
+}
+
+#[test]
+fn on_evm_signed_normalises_high_s() {
+    // A high s with the flipped parity gives the same transaction as the low-s form.
+    assert_eq!(run_payout(false), run_payout(true));
+}
+
+#[test]
+#[should_panic(expected = "MPC sign failed")]
+fn on_evm_signed_panics_when_mpc_call_failed() {
+    let c = setup();
+    set_payout_ctx(SELF_ACCOUNT, 0, 100);
+    let _ = c.on_evm_signed(evm_tx(), Err(near_sdk::PromiseError::Failed));
+}
+
+#[test]
+#[should_panic(expected = "unexpected MPC scheme")]
+fn on_evm_signed_rejects_other_schemes() {
+    let key = test_key();
+    let mut sig = mpc_response(&key, &[0x11; 32], 5, false);
+    sig.scheme = "Ed25519".to_string();
+    let c = setup();
+    set_payout_ctx(SELF_ACCOUNT, 0, 100);
+    let _ = c.on_evm_signed(evm_tx(), Ok(sig));
+}
+
+#[test]
+#[should_panic(expected = "recovery_id must be 0 or 1")]
+fn on_evm_signed_rejects_bad_recovery_id() {
+    let key = test_key();
+    let mut sig = mpc_response(&key, &[0x11; 32], 5, false);
+    sig.recovery_id = 2;
+    let c = setup();
+    set_payout_ctx(SELF_ACCOUNT, 0, 100);
+    let _ = c.on_evm_signed(evm_tx(), Ok(sig));
 }
 
 // ---- Multi-hop routes, quotes and fee admin ----
