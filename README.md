@@ -1,8 +1,8 @@
 # Wind Swap v4
 
-Wind Swap v4 rebuilds the Wind Swap protocol (concentrated liquidity, V2 volatile/stable pools,
-WIND token, veNFT locks, voting, gauges, emissions, bribes) as an **off-chain engine in Rust**
-that serves **any chain without deploying contracts on it**.
+Wind Swap v4 rebuilds the Wind Swap protocol (concentrated-liquidity pools, WIND token, veNFT locks,
+voting, gauges, emissions, bribes) as an **off-chain engine in Rust** that serves **any chain without
+deploying contracts on it**. All pools are concentrated liquidity (Uniswap v3 style).
 
 - One shared liquidity pool per pair across every chain
 - Cross-chain swaps built in
@@ -27,7 +27,6 @@ Phase 0 — engine port:
 - [x] Concentrated-liquidity math: `FullMath`, `UnsafeMath`, `BitMath`, `LiquidityMath`, `TickMath`, `SqrtPriceMath`, `SwapMath`
 - [ ] Ticks, tick bitmap, positions, oracle
 - [ ] CL pool (swap, mint, burn, collect) + fee modules
-- [ ] V2 volatile/stable pools
 - [ ] Router + quoter
 
 ## Correctness: differential testing

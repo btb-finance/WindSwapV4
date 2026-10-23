@@ -6,7 +6,9 @@
 
 Sources being ported:
 - **windv3swap** (`../contracts`): concentrated-liquidity (CL) pools, custom fee modules, CL gauges, WindMEV hook
-- **windv2** (github.com/btb-finance/windv2): V2 volatile + stable pools, WIND token, VotingEscrow (veNFT), Voter, Minter, RewardsDistributor, gauges, fee/bribe rewards, managed veNFTs, governance
+- **windv2** (github.com/btb-finance/windv2): WIND token, VotingEscrow (veNFT), Voter, Minter, RewardsDistributor, fee/bribe rewards, managed veNFTs, governance. **Its V2 volatile/stable pools are not ported.**
+
+**All pools are concentrated liquidity (Uniswap v3 style).** There are no V2 constant-product or stable-curve pools. Stable pairs (e.g. USDC/USDT) are CL pools with a small tick spacing and low fee.
 
 - The same pool math, fee modules, staking, voting, emissions and rebase logic as the Solidity contracts, ported to Rust.
 - Pools live in **one shared off-chain state**, so a single `ETH/SOL` pool serves every chain instead of separate, fragmented pools on each chain.
@@ -230,13 +232,9 @@ Holders bridge 1:1 into Solana WIND: send old WIND to the Sei or Base vault, and
 | `Voter.sol` | `engine::voter` | Weekly epochs, vote/reset/poke, gauge weights, create/kill/revive gauge, token whitelist, `distribute` emissions to gauges |
 | `Minter.sol` | `engine::minter` | Weekly emissions: 10M start, +3% for 14 epochs, then −1%/week, tail emissions at `TAIL_START`, 5% team rate, `nudge` via EpochGovernor |
 | `RewardsDistributor.sol` | `engine::rebase` | Rebase (anti-dilution) for veNFT holders, `claim`/`claimMany` |
-| `gauges/Gauge.sol` | `engine::gauge::v2` | Stake V2 LP → earn WIND; pool fees go to voters |
 | `rewards/Reward.sol`, `VotingReward`, `FeesVotingReward`, `BribeVotingReward` | `engine::rewards` | Per-epoch fee & bribe rewards for voters (balance/supply checkpoints) |
 | `rewards/ManagedReward`, `LockedManagedReward`, `FreeManagedReward` | `engine::rewards::managed` | Managed veNFT (relay / auto-compounder) rewards |
-| `Pool.sol` | `engine::pool::v2` | Volatile (`x·y=k`) and stable (`x³y+y³x=k`, Newton solver `_get_y`) pools, TWAP observations |
-| `PoolFees.sol` | merged into `engine::pool::v2` | Fees tracked in state, no separate holder |
-| `Router.sol` | `engine::router` | Unified router across V2 + CL pools |
-| `factories/PoolFactory`, `GaugeFactory`, `VotingRewardsFactory`, `ManagedRewardsFactory`, `FactoryRegistry` | `engine::factory` | Pool/gauge/reward creation become plain state ops |
+| `factories/VotingRewardsFactory`, `ManagedRewardsFactory`, `FactoryRegistry` | `engine::factory` | Gauge/reward creation become plain state ops |
 | `ProtocolGovernor.sol`, `governance/*` (VetoGovernor) | `engine::governance` | ve-weighted proposals, veto council, executable actions = engine parameter changes |
 | `EpochGovernor.sol` | `engine::governance::epoch` | Weekly tail-emission nudge vote |
 | `AirdropDistributor.sol` | `engine::airdrop` | Airdrop as locked veNFTs in state |
@@ -261,9 +259,9 @@ Holders bridge 1:1 into Solana WIND: send old WIND to the Sei or Base vault, and
 | `core/fees/CustomUnstakedFeeModule.sol` | `engine::fees::unstaked_fee` | Default 10%, max 50% |
 | `gauge/CLGauge.sol` | `engine::gauge::cl` | Stake CL position → earn WIND; staked/unstaked fee split |
 | `periphery/lens/Quoter*.sol`, `SugarHelper.sol` | `api::quote` | Read-only queries against engine state |
-| `periphery/SwapRouter.sol` / `Path.sol` | `engine::router` | Multi-hop routing over V2 + CL pools |
+| `periphery/SwapRouter.sol` / `Path.sol` | `engine::router` | Multi-hop routing over CL pools |
 
-The V2 and CL gauges both plug into the same `engine::voter`, exactly as both pool types share one Voter on-chain today.
+CL gauges plug into `engine::voter`, as they do on-chain today.
 
 ### Not needed off-chain
 
@@ -271,6 +269,7 @@ The V2 and CL gauges both plug into the same `engine::voter`, exactly as both po
 |---|---|
 | windv2 `migration/WindMigrationSender/Receiver` (Hyperlane veNFT migration) | All chains share one state, so no cross-chain migration is needed. Existing on-chain veNFTs migrate in once (see Migration below) |
 | windv2 `WindAggregatorProxy.sol` | Becomes an optional solver that routes to external DEXs |
+| windv2 `Pool.sol`, `PoolFees.sol`, `Router.sol`, `PoolFactory`, `gauges/Gauge.sol` (V2 volatile/stable pools) | Decision: all pools are CL (v3 style); stable pairs use small tick spacing |
 | ERC-721 machinery in `VotingEscrow` (approve, safeTransfer, `onERC721Received`) | veNFTs are state records; transfers are signed messages |
 | Forwarder / meta-tx (ERC-2771) | Every non-deposit action is already a gasless signed message |
 | Swap/mint/flash callbacks (`ICL*Callback`, `CallbackValidation`) | No on-chain atomicity; funds are already in vaults |
@@ -288,7 +287,7 @@ WindMEV currently sends arbitrage profit to voters as bribes. Off-chain, the eng
 Epoch flip (Thursday 00:00 UTC, consensus time)
   1. Minter.updatePeriod   → mint weekly emissions + rebase + team share
   2. RewardsDistributor    → checkpoint rebase for veNFT holders
-  3. Voter.distribute      → split emissions to V2 + CL gauges by vote weight
+  3. Voter.distribute      → split emissions to CL gauges by vote weight
   4. Gauges claim pool fees → FeesVotingReward for that pool's voters
   5. Bribes deposited last epoch become claimable
 ```
@@ -352,8 +351,8 @@ deposit →  │ CL pools · fee modules · router · gauges · ve(3,3)     │ 
 windswap-v4/
 ├── crates/
 │   ├── engine/          # Wind Swap port (pure library, no I/O; also compiles to wasm for NEAR):
-│   │                    #   math, pool::{v2, cl}, factory, fees, router,
-│   │                    #   token, ve, voter, minter, rebase, gauge::{v2, cl},
+│   │                    #   math, pool (CL), factory, fees, router,
+│   │                    #   token, ve, voter, minter, rebase, gauge,
 │   │                    #   rewards, governance, airdrop, time
 │   ├── accounts/        # internal accounts, multi-chain address linking, signed-message verification
 │   ├── state/           # vaults, balances, positions, pending outbounds, storage
@@ -439,10 +438,9 @@ The bond asset could be **$BTB / the Wind ve token**, which ties node security t
 - [ ] Port CL math libraries (TickMath, SqrtPriceMath, SwapMath, FullMath, LiquidityMath, BitMath)
 - [ ] Port `ClPool`: initialize, mint, burn, collect, swap, ticks, positions, oracle
 - [ ] Port CL fee modules + staked/unstaked fee split
-- [ ] Port V2 `Pool`: volatile + stable curves, mint/burn/swap, fees, TWAP
-- [ ] Port factories (tick spacings → fees, V2 stable/volatile fees)
-- [ ] Differential tests vs Foundry on `../contracts` and windv2 (bit-for-bit)
-- [ ] Unified multi-hop router (V2 + CL) + quoter
+- [ ] Port factory (tick spacings → fees)
+- [ ] Differential tests vs Foundry on `../contracts` (bit-for-bit)
+- [ ] Multi-hop router over CL pools + quoter
 
 ### Phase 0b: NEAR Prototype (2–3 weeks)
 - [ ] Wrap the engine library in a NEAR contract (`near-sdk`), deploy to NEAR testnet
@@ -483,7 +481,7 @@ The bond asset could be **$BTB / the Wind ve token**, which ties node security t
 - [ ] Managed veNFTs + Locked/Free managed rewards
 - [ ] RewardsDistributor (rebase) + claims
 - [ ] Voter: vote/reset/poke, whitelist, create/kill/revive gauge, distribute
-- [ ] V2 Gauge + CL Gauge staking and emissions
+- [ ] CL Gauge staking and emissions
 - [ ] FeesVotingReward + BribeVotingReward (any whitelisted asset from any chain as a bribe)
 - [ ] Automatic weekly epoch flip
 - [ ] Protocol share → voter fee rewards (replaces the WindMEV bribe flow)
@@ -498,7 +496,7 @@ The bond asset could be **$BTB / the Wind ve token**, which ties node security t
 ### Phase 5: Product (1–2 months)
 - [ ] Quote / positions / analytics API (SugarHelper equivalent)
 - [ ] TypeScript SDK (deposit building + message signing for EVM, Solana, Sui, BTC wallets)
-- [ ] Frontend: swap, V2 + CL liquidity, gauges/staking, lock/veNFT management, voting, bribes, rewards, governance
+- [ ] Frontend: swap, CL liquidity (range picker), gauges/staking, lock/veNFT management, voting, bribes, rewards, governance
 
 ### Phase 6: Chain Expansion (ongoing)
 - [ ] Config-driven EVM onboarding (Sei, Base, Ethereum, Arbitrum, BSC, …)
