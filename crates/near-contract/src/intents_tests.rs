@@ -532,3 +532,31 @@ fn with_pool() -> (Contract, u64) {
     c.add_relayer(acct(RELAYER));
     (c, pool)
 }
+
+/// The canonical JSON that intent signatures cover. The relayer must produce exactly this.
+#[test]
+fn intent_json_is_the_canonical_form() {
+    let swap = Intent::Swap {
+        token_in: ETH.into(),
+        amount_in: U128(1_000),
+        path: vec![hop(0, ETH)],
+        min_amount_out: U128(1),
+        to: Receiver::Evm([0x22; 20]),
+    };
+    assert_eq!(
+        serde_json::to_string(&swap).unwrap(),
+        "{\"Swap\":{\"token_in\":\"base-sepolia:eth\",\"amount_in\":\"1000\",\"path\":[{\"pool_id\":0,\"token_in\":\"base-sepolia:eth\"}],\"min_amount_out\":\"1\",\"to\":\"evm:0x2222222222222222222222222222222222222222\"}}"
+    );
+    let add = Intent::AddLiquidity {
+        token_in: USDC.into(),
+        amount_in: U128(5),
+        pool_id: 3,
+        tick_lower: -300,
+        tick_upper: 300,
+        min_liquidity: U128(0),
+    };
+    assert_eq!(
+        serde_json::to_string(&add).unwrap(),
+        "{\"AddLiquidity\":{\"token_in\":\"usdc.fakes.testnet\",\"amount_in\":\"5\",\"pool_id\":3,\"tick_lower\":-300,\"tick_upper\":300,\"min_liquidity\":\"0\"}}"
+    );
+}
