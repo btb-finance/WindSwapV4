@@ -9,6 +9,7 @@
 
 pub mod error;
 pub mod math;
+pub mod pool;
 
 pub use alloy_primitives::{I256, U256};
 pub use error::MathError;

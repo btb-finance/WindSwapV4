@@ -21,6 +21,16 @@ pub enum MathError {
     InvalidInput,
     /// Price would move past the allowed bound.
     PriceOutOfBounds,
+    /// `Tick.update`: liquidity gross above max liquidity per tick (`"LO"`).
+    LiquidityOverflow,
+    /// `TickBitmap.flipTick`: tick is not a multiple of the tick spacing.
+    TickMisaligned,
+    /// `Position.update`: poke on a position with zero liquidity (`"NP"`).
+    NoPositionLiquidity,
+    /// `Oracle`: oracle not initialized / zero cardinality (`"I"`).
+    OracleNotInitialized,
+    /// `Oracle`: requested time is older than the oldest observation (`"OLD"`).
+    ObservationTooOld,
 }
 
 impl fmt::Display for MathError {
