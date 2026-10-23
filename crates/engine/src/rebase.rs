@@ -264,7 +264,9 @@ impl RewardsDistributor {
             }
             Ok(Payout::Transferred { to, amount })
         } else {
-            ve.deposit_for(now, block, token, amount)?;
+            // msg.sender of VotingEscrow.depositFor is the distributor itself
+            let distributor = ve.distributor;
+            ve.deposit_for(distributor, now, block, token, amount)?;
             Ok(Payout::Deposited { token, amount })
         }
     }

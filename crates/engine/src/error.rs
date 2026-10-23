@@ -153,8 +153,6 @@ pub enum MathError {
     TooManyPools,
     /// `Voter.vote`: after the vote window and the token is not whitelisted (`NotWhitelistedNFT`).
     NotWhitelistedNft,
-    /// `Voter`: caller is not the governor (`NotGovernor`).
-    NotGovernor,
     /// `Voter`: caller is not the emergency council (`NotEmergencyCouncil`).
     NotEmergencyCouncil,
     /// `Voter` / `RewardsDistributor`: caller is not the minter (`NotMinter`).
@@ -169,8 +167,6 @@ pub enum MathError {
     GaugeNotAlive,
     /// `Voter._vote`: the pool already has a vote from this token (`NonZeroVotes`).
     NonZeroVotes,
-    /// `Voter._vote`: the pool's vote weight rounds to zero (`ZeroBalance`).
-    ZeroBalance,
     /// `Voter.createGauge`: the pool factory is not approved in the registry (`FactoryPathNotApproved`).
     FactoryPathNotApproved,
     /// `Voter.createGauge`: the pool already has a gauge (`GaugeExists`).
@@ -185,8 +181,6 @@ pub enum MathError {
     GaugeAlreadyRevived,
     /// `Voter.distribute` / `updateFor`: pool index past the end of `pools` (`Panic(0x32)`).
     IndexOutOfBounds,
-    /// `Voter.setEmergencyCouncil`: the zero address (`ZeroAddress`).
-    ZeroAddress,
     /// `RewardsDistributor.claim`: the minter's active period is behind the current week (`UpdatePeriod`).
     UpdatePeriod,
     /// `RewardsDistributor`: a payout to an owner of address zero (OZ `ERC20: transfer to the zero address`).

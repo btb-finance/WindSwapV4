@@ -272,7 +272,9 @@ fn apply(
             Ok((format!("{id}:{pulled}"), vec![]))
         }
         "depositFor" => {
-            let pulled = world.ve.deposit_for(now, block, n(a[1]), u(a[2]))?;
+            let pulled = world
+                .ve
+                .deposit_for(caller(), now, block, n(a[1]), u(a[2]))?;
             world.debit(caller(), pulled);
             world.credit(acct(VE_ACCOUNT), pulled);
             Ok((pulled.to_string(), vec![]))
@@ -308,7 +310,7 @@ fn apply(
         "transferFrom" => {
             world
                 .ve
-                .transfer_from(caller(), block, acct(n(a[1])), acct(n(a[2])), n(a[3]))?;
+                .transfer_from(caller(), now, block, acct(n(a[1])), acct(n(a[2])), n(a[3]))?;
             Ok((String::new(), vec![]))
         }
         "rebase" => {
