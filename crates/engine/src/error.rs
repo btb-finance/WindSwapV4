@@ -115,7 +115,7 @@ pub enum MathError {
     NotGovernor,
     /// `Voter`: caller is not the emergency council (`NotEmergencyCouncil`).
     NotEmergencyCouncil,
-    /// `Voter`: caller is not the minter (`NotMinter`).
+    /// `Voter` / `RewardsDistributor`: caller is not the minter (`NotMinter`).
     NotMinter,
     /// `Voter.setMaxVotingNum`: below the minimum of 10 (`MaximumVotingNumberTooLow`).
     MaximumVotingNumberTooLow,
@@ -145,6 +145,10 @@ pub enum MathError {
     IndexOutOfBounds,
     /// `Voter.setEmergencyCouncil`: the zero address (`ZeroAddress`).
     ZeroAddress,
+    /// `RewardsDistributor.claim`: the minter's active period is behind the current week (`UpdatePeriod`).
+    UpdatePeriod,
+    /// `RewardsDistributor`: a payout to an owner of address zero (OZ `ERC20: transfer to the zero address`).
+    TransferToZeroAddress,
 }
 
 impl fmt::Display for MathError {

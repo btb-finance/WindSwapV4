@@ -13,6 +13,7 @@ pub mod gauge;
 pub mod math;
 pub mod minter;
 pub mod pool;
+pub mod rebase;
 pub mod rewards;
 pub mod router;
 pub mod ve;
