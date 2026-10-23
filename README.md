@@ -29,7 +29,7 @@ Phase 0 — engine port:
 - [x] Fee config: tick-spacing fees, custom swap/unstaked fees, whitelist
 - [x] CL pool: initialize, mint, burn, collect, swap, stake, reward growth, gauge fees
 - [ ] CL pool differential test against the real `CLPool.sol`
-- [ ] NEAR contract (testnet)
+- [x] NEAR contract v0 deployed to testnet: `windswapv4-btb.testnet` (see [docs/testnet.md](docs/testnet.md))
 - [ ] Router + quoter
 
 ## Correctness: differential testing
