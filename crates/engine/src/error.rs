@@ -49,6 +49,12 @@ pub enum MathError {
     TooLittleReceived,
     /// `SwapRouter`: exact-output route needed more than `amountInMaximum` (`"Too much requested"`).
     TooMuchRequested,
+    /// `Minter.nudge`: tail emissions not active yet, `weekly >= TAIL_START` (`TailEmissionsInactive`).
+    TailEmissionsInactive,
+    /// `Minter.nudge`: the current period was already nudged (`AlreadyNudged`).
+    AlreadyNudged,
+    /// `Minter.setTeamRate`: rate above `MAXIMUM_TEAM_RATE` (`RateTooHigh`).
+    RateTooHigh,
 }
 
 impl fmt::Display for MathError {
