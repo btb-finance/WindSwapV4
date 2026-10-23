@@ -55,6 +55,14 @@ pub enum MathError {
     AlreadyNudged,
     /// `Minter.setTeamRate`: rate above `MAXIMUM_TEAM_RATE` (`RateTooHigh`).
     RateTooHigh,
+    /// `Reward`: caller is not the authorized voter, or not approved or owner of the veNFT (`NotAuthorized`).
+    NotAuthorized,
+    /// `FeesVotingReward.notifyRewardAmount`: sender is not the gauge mapped to this contract (`NotGauge`).
+    NotGauge,
+    /// `FeesVotingReward.notifyRewardAmount`: token is not a reward of this contract (`InvalidReward`).
+    InvalidReward,
+    /// `BribeVotingReward.notifyRewardAmount`: a new reward token is not whitelisted (`NotWhitelisted`).
+    NotWhitelisted,
 }
 
 impl fmt::Display for MathError {
