@@ -1,0 +1,160 @@
+{
+ "transaction": {
+  "signer_id": "windswapv4-user.testnet",
+  "public_key": "ed25519:7icT2QVWAoPetZtSo6NYyBWxbZsjnEiA9fCNF1iUo13Y",
+  "nonce": 274358128000026,
+  "receiver_id": "windswapv4-btb.testnet",
+  "actions": [
+   {
+    "FunctionCall": {
+     "method_name": "bribe",
+     "args": "eyJhbW91bnQiOiI1MDAwMDAwMDAwMDAwMDAwMDAwIiwicG9vbF9pZCI6MSwidG9rZW4iOiJ3aW5kc3dhcHY0LXR1c2RjLnRlc3RuZXQifQ==",
+     "gas": 300000000000000,
+     "deposit": "0"
+    }
+   }
+  ],
+  "priority_fee": 0,
+  "signature": "ed25519:6W4rwHmkuapohYuhPQKm44o33r6eHsSZPaB8mdtDnHmyMz3QepanaYsBpnYUJW5J7KGLGGaLEsrdJqJs1jjTx6u",
+  "hash": "JAvQy8Xw2d1cgDBZzDKtBTFF3XGQQUhcoqQRLkmp9Rj7"
+ },
+ "execution_outcome": {
+  "block_hash": "EsBJu7XC8BFdB8DkNkpiVRFF9PWT3T218sQfn5eZ7KfG",
+  "block_timestamp": 1792746818637121800,
+  "block_height": 274377974,
+  "index": 3,
+  "id": "JAvQy8Xw2d1cgDBZzDKtBTFF3XGQQUhcoqQRLkmp9Rj7",
+  "outcome": {
+   "logs": [],
+   "receipt_ids": [
+    "JBkBnXmjsvBtE8T7hgWHN4obEvTqFKBsWsB8UnrcVHj1"
+   ],
+   "gas_burnt": 312064932060,
+   "tokens_burnt": "31206493206000000000",
+   "executor_id": "windswapv4-user.testnet",
+   "status": {
+    "SuccessReceiptId": "JBkBnXmjsvBtE8T7hgWHN4obEvTqFKBsWsB8UnrcVHj1"
+   },
+   "metadata": {
+    "version": 1,
+    "gas_profile": null
+   }
+  }
+ },
+ "receipts": [
+  {
+   "execution_outcome": {
+    "block_hash": "FMz8XwrHERCtYoiL4z6FpKbKn68PgeGet8H14gNQnMC4",
+    "block_timestamp": 1792746819239427000,
+    "block_height": 274377975,
+    "index": 3,
+    "id": "JBkBnXmjsvBtE8T7hgWHN4obEvTqFKBsWsB8UnrcVHj1",
+    "outcome": {
+     "logs": [],
+     "receipt_ids": [
+      "2vWyn6wqu7jMMdJXu6F2svSoTyLwGLsKXd7sV1GGhVzV"
+     ],
+     "gas_burnt": 3744162569672,
+     "tokens_burnt": "374416256967200000000",
+     "executor_id": "windswapv4-btb.testnet",
+     "status": {
+      "SuccessValue": ""
+     },
+     "metadata": {
+      "version": 4,
+      "gas_profile": null,
+      "contracts": [
+       {
+        "local": "BdiGQsmQAdAGXsWvCnTGA1JMsKq5zqd3jSDNGUD51Htu"
+       }
+      ]
+     }
+    }
+   },
+   "receipt": {
+    "block_height": 274377975,
+    "block_hash": "FMz8XwrHERCtYoiL4z6FpKbKn68PgeGet8H14gNQnMC4",
+    "block_timestamp": 1792746819239427000,
+    "receipt_index": 3,
+    "predecessor_id": "windswapv4-user.testnet",
+    "receiver_id": "windswapv4-btb.testnet",
+    "receipt_id": "JBkBnXmjsvBtE8T7hgWHN4obEvTqFKBsWsB8UnrcVHj1",
+    "receipt": {
+     "Action": {
+      "signer_id": "windswapv4-user.testnet",
+      "signer_public_key": "ed25519:7icT2QVWAoPetZtSo6NYyBWxbZsjnEiA9fCNF1iUo13Y",
+      "gas_price": "1000000000",
+      "output_data_receivers": [],
+      "input_data_ids": [],
+      "actions": [
+       {
+        "FunctionCall": {
+         "method_name": "bribe",
+         "args": "eyJhbW91bnQiOiI1MDAwMDAwMDAwMDAwMDAwMDAwIiwicG9vbF9pZCI6MSwidG9rZW4iOiJ3aW5kc3dhcHY0LXR1c2RjLnRlc3RuZXQifQ==",
+         "gas": 300000000000000,
+         "deposit": "0"
+        }
+       }
+      ],
+      "is_promise_yield": false
+     }
+    },
+    "priority": 0
+   }
+  },
+  {
+   "execution_outcome": {
+    "block_hash": "HAd2vW5zCRsnrQCSUbaWCZMjAWsQ1oDEDQiRdoVStpwx",
+    "block_timestamp": 1792746819881664000,
+    "block_height": 274377976,
+    "index": 4,
+    "id": "2vWyn6wqu7jMMdJXu6F2svSoTyLwGLsKXd7sV1GGhVzV",
+    "outcome": {
+     "logs": [],
+     "receipt_ids": [],
+     "gas_burnt": 223182562500,
+     "tokens_burnt": "0",
+     "executor_id": "windswapv4-user.testnet",
+     "status": {
+      "SuccessValue": ""
+     },
+     "metadata": {
+      "version": 4,
+      "gas_profile": null,
+      "contracts": [
+       null
+      ]
+     }
+    }
+   },
+   "receipt": {
+    "block_height": 274377976,
+    "block_hash": "HAd2vW5zCRsnrQCSUbaWCZMjAWsQ1oDEDQiRdoVStpwx",
+    "block_timestamp": 1792746819881664000,
+    "receipt_index": 4,
+    "predecessor_id": "system",
+    "receiver_id": "windswapv4-user.testnet",
+    "receipt_id": "2vWyn6wqu7jMMdJXu6F2svSoTyLwGLsKXd7sV1GGhVzV",
+    "receipt": {
+     "Action": {
+      "signer_id": "windswapv4-user.testnet",
+      "signer_public_key": "ed25519:7icT2QVWAoPetZtSo6NYyBWxbZsjnEiA9fCNF1iUo13Y",
+      "gas_price": "0",
+      "output_data_receivers": [],
+      "input_data_ids": [],
+      "actions": [
+       {
+        "Transfer": {
+         "deposit": "300513831061488800000000"
+        }
+       }
+      ],
+      "is_promise_yield": false
+     }
+    },
+    "priority": 0
+   }
+  }
+ ],
+ "data_receipts": []
+}
