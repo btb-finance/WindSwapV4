@@ -1,0 +1,33 @@
+{
+  "name": "@windswap/indexer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Wind Swap v4 indexer: NEAR contract activity -> Postgres (Supabase-compatible)",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "windswap-indexer": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:integration": "vitest run test/integration.test.ts",
+    "test:integration:local": "bash scripts/with-local-postgres.sh npm run test:integration",
+    "migrate": "node --env-file-if-exists=.env dist/cli.js migrate",
+    "start": "node --env-file-if-exists=.env dist/cli.js run",
+    "backfill": "node --env-file-if-exists=.env dist/cli.js backfill",
+    "status": "node --env-file-if-exists=.env dist/cli.js status"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/pg": "^8.11.10",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.5"
+  }
+}
